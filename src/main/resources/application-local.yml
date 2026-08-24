@@ -1,0 +1,36 @@
+## ---------------------------------------------------------------------------------------------
+## Perfil 'local': todo contra LocalStack y un broker en la máquina del desarrollador.
+##
+##   ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+##
+## Las credenciales son las que LocalStack acepta por convención; no son secretos.
+## ---------------------------------------------------------------------------------------------
+
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+
+centinela:
+  aws:
+    region: eu-west-1
+    endpoint-override: http://localhost:4566
+  motor:
+    # Sin presión de producción, más margen para poder depurar paso a paso.
+    presupuesto-latencia: 5s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: always
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  level:
+    com.centinela.fraude: DEBUG
+    org.springframework.kafka: INFO

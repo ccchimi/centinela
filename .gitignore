@@ -1,0 +1,44 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### Compilación nativa ###
+# Anclados a la raíz con '/': sin la barra, el patrón 'centinela' también casaría con el
+# directorio src/main/java/com/centinela y se ignoraría todo el código fuente.
+*.build_artifacts.txt
+/centinela
+/centinela.exe
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
+### Eclipse / VS Code ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+.vscode/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+
+### Sistema operativo ###
+.DS_Store
+Thumbs.db
+
+### Local ###
+*.log
+.env
+.env.local

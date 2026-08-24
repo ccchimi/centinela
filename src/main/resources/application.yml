@@ -1,0 +1,191 @@
+## ---------------------------------------------------------------------------------------------
+## Centinela - configuración base
+##
+## Todo valor con impacto en producción se resuelve por variable de entorno con un valor por
+## defecto apto para desarrollo local. Ningún secreto vive en este fichero: en AWS los inyecta
+## Secrets Manager a través del task definition.
+##
+## Perfiles: 'local' (LocalStack + broker local, ver application-local.yml) y 'aws'.
+## ---------------------------------------------------------------------------------------------
+
+spring:
+  application:
+    name: centinela
+
+  main:
+    banner-mode: "off"
+
+  threads:
+    virtual:
+      # El motor es masivamente concurrente y sus operaciones son de E/S (DynamoDB,
+      # ElastiCache, Kafka). Con virtual threads cada evaluación puede bloquear sin coste:
+      # desaparece la necesidad de un pool dimensionado a mano y de código reactivo.
+      # Requiere que ninguna ruta caliente use synchronized sobre E/S; desde JDK 24 (JEP 491)
+      # ni siquiera eso fija el hilo portador.
+      enabled: true
+
+  lifecycle:
+    # Margen para terminar las evaluaciones en vuelo antes de cerrar. Debe ser mayor que el
+    # presupuesto de latencia del motor y menor que el grace period del orquestador.
+    timeout-per-shutdown-phase: 25s
+
+  # ============================================================================================
+  # Kafka
+  # ============================================================================================
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: ${spring.application.name}
+
+    properties:
+      security.protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+      # En MSK con autenticación IAM, el perfil 'aws' añade aquí sasl.mechanism=AWS_MSK_IAM
+      # y el callback handler del SDK.
+      metadata.max.age.ms: 180000
+
+    consumer:
+      group-id: ${KAFKA_GROUP_ID:centinela-evaluador}
+      # 'latest' y no 'earliest': si el motor estuvo caído, reevaluar autorizaciones de hace
+      # horas no aporta nada (ya se resolvieron) y sí crea una avalancha de decisiones tardías.
+      # La reevaluación histórica es un proceso aparte y deliberado.
+      auto-offset-reset: latest
+      enable-auto-commit: false
+      isolation-level: read_committed
+      max-poll-records: 50
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ErrorHandlingDeserializer envuelve al delegado: un mensaje corrupto se convierte en un
+      # registro con cabecera de error en vez de matar el contenedor en un bucle infinito.
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        # Sin cabeceras de tipo: el productor es un sistema externo que no las escribe, y
+        # confiar en un tipo que viene en el mensaje sería una superficie de ataque.
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: com.centinela.fraude.infraestructura.adaptador.entrada.kafka.TransaccionEvento
+        spring.json.trusted.packages: com.centinela.fraude.infraestructura.adaptador.entrada.kafka
+        # Debe superar con holgura (presupuesto de latencia x max-poll-records) o el consumidor
+        # se expulsa del grupo justo cuando más carga hay.
+        max.poll.interval.ms: 60000
+        session.timeout.ms: 30000
+        heartbeat.interval.ms: 3000
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        compression.type: zstd
+        # 5 ms de espera agrupan lotes sin comprometer el presupuesto de latencia.
+        linger.ms: 5
+        delivery.timeout.ms: 30000
+        spring.json.add.type.headers: false
+
+    listener:
+      # Confirmación explícita tras evaluar y publicar: si el proceso cae a mitad, el mensaje
+      # se reprocesa. Al-menos-una-vez con decisiones idempotentes por id de transacción.
+      ack-mode: manual_immediate
+      # Nunca por encima del número de particiones del topic: los consumidores sobrantes
+      # quedarían ociosos.
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}
+      observation-enabled: true
+
+  # ============================================================================================
+  # ElastiCache (Valkey/Redis) - contadores de velocidad
+  # ============================================================================================
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      ssl:
+        enabled: ${REDIS_SSL_ENABLED:false}
+      # Timeout agresivo a propósito: este acceso está dentro de la ventana de autorización.
+      # Si la caché no responde en 80 ms, el motor degrada la señal de velocidad y sigue.
+      timeout: 80ms
+      connect-timeout: 250ms
+      client-type: lettuce
+      lettuce:
+        pool:
+          enabled: true
+          max-active: 32
+          max-idle: 16
+          min-idle: 4
+          max-wait: 50ms
+
+# ================================================================================================
+# Configuración propia del motor
+# ================================================================================================
+centinela:
+  aws:
+    region: ${AWS_REGION:eu-west-1}
+    # Vacío en AWS real; apuntado a LocalStack en el perfil 'local' y en los tests.
+    endpoint-override: ${AWS_ENDPOINT_OVERRIDE:}
+    dynamodb:
+      tabla-perfiles: ${TABLA_PERFILES:centinela-perfiles}
+      tabla-auditoria: ${TABLA_AUDITORIA:centinela-auditoria}
+      # Retención del rastro de auditoría, en días.
+      retencion-auditoria-dias: 2555
+    cliente:
+      timeout-api-call: 120ms
+      timeout-intento: 60ms
+      max-reintentos: 2
+      max-conexiones: 64
+
+  kafka:
+    topics:
+      transacciones: ${TOPIC_TRANSACCIONES:fraude.transacciones.v1}
+      decisiones: ${TOPIC_DECISIONES:fraude.decisiones.v1}
+      # Las transacciones que no se pueden ni deserializar ni evaluar acaban aquí, nunca se
+      # descartan: en fraude, un mensaje perdido es una autorización sin control.
+      descartes: ${TOPIC_DESCARTES:fraude.transacciones.dlq.v1}
+
+  motor:
+    # Presupuesto total de la evaluación. Al agotarse, el motor decide con las señales que ya
+    # tiene en lugar de esperar: llegar tarde a una autorización equivale a no responder.
+    presupuesto-latencia: 150ms
+    # Ventana por defecto de los contadores de velocidad.
+    ventana-velocidad: 60s
+    # Desfase de reloj tolerado en la marca de tiempo del evento antes de considerarla inválida.
+    tolerancia-desfase-reloj: 5m
+    # Moneda de referencia para perfiles de clientes sin historial.
+    moneda-por-defecto: EUR
+
+# ================================================================================================
+# Observabilidad
+# ================================================================================================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  observations:
+    key-values:
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      # Muestreo bajo en el flujo caliente; las decisiones de bloqueo se trazan siempre desde
+      # el propio adaptador, con independencia de esta probabilidad.
+      probability: ${TRACING_SAMPLE_RATE:0.05}
+
+server:
+  shutdown: graceful
+  port: ${SERVER_PORT:8080}
+
+logging:
+  level:
+    root: INFO
+    com.centinela.fraude: ${LOG_LEVEL_CENTINELA:INFO}
+    org.apache.kafka: WARN
+    software.amazon.awssdk: WARN
+  pattern:
+    correlation: "[${spring.application.name},%X{traceId:-},%X{spanId:-}] "
