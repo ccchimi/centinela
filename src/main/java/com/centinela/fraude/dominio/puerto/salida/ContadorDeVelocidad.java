@@ -1,6 +1,6 @@
 package com.centinela.fraude.dominio.puerto.salida;
 
-import com.centinela.fraude.dominio.compartido.Invariantes;
+import com.centinela.fraude.dominio.modelo.vo.ClaveDeVelocidad;
 import java.time.Duration;
 
 /**
@@ -23,26 +23,8 @@ public interface ContadorDeVelocidad {
      *
      * @return número de eventos observados para esa clave en la ventana, incluido este
      */
-    long incrementarYContar(Clave clave, Duration ventana);
+    long incrementarYContar(ClaveDeVelocidad clave, Duration ventana);
 
     /** Consulta sin incrementar, para reglas que solo leen. */
-    long contar(Clave clave, Duration ventana);
-
-    /**
-     * Clave del contador: qué se cuenta y sobre qué valor.
-     *
-     * @param dimension eje de agregación, p. ej. {@code INTENTOS_POR_DISPOSITIVO}
-     * @param valor identificador concreto dentro de esa dimensión
-     */
-    record Clave(String dimension, String valor) {
-
-        public Clave {
-            dimension = Invariantes.textoConContenido(dimension, "clave.dimension", 64);
-            valor = Invariantes.textoConContenido(valor, "clave.valor", 128);
-        }
-
-        public static Clave de(String dimension, String valor) {
-            return new Clave(dimension, valor);
-        }
-    }
+    long contar(ClaveDeVelocidad clave, Duration ventana);
 }

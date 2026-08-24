@@ -4,7 +4,8 @@ Motor de detección de fraude transaccional en tiempo real. Consume autorizacion
 las evalúa dentro del presupuesto de latencia de la autorización y emite un veredicto con la
 evidencia que lo sostiene.
 
-**Estado:** iteración 1 — esqueleto del proyecto y dominio. Sin adaptadores todavía.
+**Estado:** iteración 2 — dominio, motor de reglas y caso de uso completos y testeados
+(131 tests, sin contenedores). Sin adaptadores todavía.
 
 ---
 
@@ -58,18 +59,72 @@ com.centinela.fraude
 │   ├── modelo                   Transaccion, EvaluacionDeFraude, Decision, NivelDeRiesgo,
 │   │                            SenalDeRiesgo, PerfilDeComportamiento
 │   ├── modelo.vo                Dinero, Geolocalizacion, Comercio, InstrumentoDePago (sealed),
-│   │                            IdTransaccion, IdCliente, IdDispositivo, PuntajeDeRiesgo, Canal
+│   │                            IdTransaccion, IdCliente, IdDispositivo, PuntajeDeRiesgo,
+│   │                            Canal, ClaveDeVelocidad, DimensionDeVelocidad
+│   ├── regla                    MotorDeReglas, ReglaDeFraude, ContextoDeEvaluacion,
+│   │                            ResultadoDeRegla (sealed), PoliticaDeRiesgo
+│   ├── regla.catalogo           las 9 reglas de detección
 │   ├── puerto.entrada           EvaluarTransaccionUseCase
 │   ├── puerto.salida            RepositorioDePerfiles, ContadorDeVelocidad,
 │   │                            PublicadorDeDecisiones, RegistroDeAuditoria
 │   ├── excepcion                jerarquía sellada de errores de dominio
 │   └── compartido               guardas de invariantes
-├── aplicacion                   ← casos de uso (pendiente)
+├── aplicacion                   ← Java plano + SLF4J, sin anotaciones de framework
+│   └── servicio                 EvaluadorDeFraudeService, ConfiguracionDelEvaluador
 └── infraestructura              ← adaptadores Kafka / DynamoDB / ElastiCache / REST (pendiente)
 ```
 
 La dirección de las dependencias **está verificada como test**
-(`ArquitecturaHexagonalTest`): si alguien importa Spring desde el dominio, el build falla.
+(`ArquitecturaHexagonalTest`): si alguien importa Spring desde el dominio o desde la capa de
+aplicación, el build falla.
+
+---
+
+## El motor de reglas
+
+```
+caso de uso                    motor                      reglas
+───────────                    ─────                      ──────
+1. pide contadores  ────►  contadoresNecesarios()  ──►  contadoresQueNecesita()
+2. resuelve E/S en paralelo (perfil + contadores) sobre hilos virtuales
+3. arma ContextoDeEvaluacion
+4. ejecuta          ────►  ejecutar(contexto)      ──►  evaluar(contexto)  ← función pura
+                           agrega con switch            ResultadoDeRegla (sellado)
+                           exhaustivo
+```
+
+### Catálogo
+
+| Código | Aporte base | Qué detecta |
+|---|---:|---|
+| `VIAJE_IMPOSIBLE` | 400 | Desplazamiento no factible desde la última posición conocida |
+| `RAFAGA_POR_DISPOSITIVO` | 260 | Card testing: lote de tarjetas probado desde una máquina |
+| `RAFAGA_POR_CLIENTE` | 200 | Cascada de cargos tras una toma de cuenta |
+| `DESVIACION_DE_IMPORTE` | 120/220/340 | Importe fuera del gasto habitual, en tres tramos |
+| `DISPOSITIVO_DESCONOCIDO` | 180 | Dispositivo nunca visto para este titular |
+| `MARCA_TEMPORAL_INCOHERENTE` | 150 | Marca de tiempo futura: intento de esquivar las ventanas |
+| `PAIS_INUSUAL` | 120 (+60) | País no frecuentado; extra si además cruza frontera |
+| `INSTRUMENTO_DE_RIESGO` | 90/150 | Billetera sin tokenizar o transferencia irreversible |
+| `COMERCIO_ALTO_RIESGO` | 90 | MCC de categoría sensible con el que el titular no opera |
+
+Los pesos están repartidos de forma que **ninguna señal aislada llega a la banda de rechazo**:
+hacen falta al menos dos indicios fuertes. Es una calibración deliberada contra los falsos
+positivos, y se cambia desde `PoliticaDeRiesgo` sin tocar código.
+
+### Los cuatro desenlaces de una regla
+
+`ResultadoDeRegla` es sellado y distingue cuatro cosas que se suelen confundir en un booleano:
+
+- **Disparada** — encontró evidencia.
+- **No disparada** — miró y no encontró nada. La transacción pasó ese control.
+- **No aplicable** — la regla no era pertinente (huella de dispositivo en un cajero).
+- **Degradada** — debía aplicar pero le faltaban datos.
+
+La cuarta es la que justifica el diseño. Si "degradada" se colapsara con "no disparada", una
+caída de la caché de contadores haría que todas las reglas de ráfaga devolvieran "nada" y el
+motor parecería sano mientras deja pasar el ataque. Al distinguirlas, la degradación viaja hasta
+`EvaluacionDeFraude.advertencias()` y una decisión tomada a ciegas es distinguible de una
+tomada con cobertura completa.
 
 ---
 
@@ -148,6 +203,39 @@ No es "o DynamoDB o ElastiCache", son dos accesos con perfiles distintos:
 - **DynamoDB** — perfil de comportamiento y rastro de auditoría. Lectura por clave y escritura
   duradera con retención regulatoria.
 
+### ADR-0007 — Las reglas no hacen E/S: protocolo en dos fases
+
+Cada regla declara qué contadores necesita (`contadoresQueNecesita`) y solo después se la
+evalúa contra un contexto ya materializado. Es la decisión central del motor.
+
+Si cada regla consultara su propio dato: la latencia sería la suma de todas las consultas en vez
+del máximo, dos reglas que miran el mismo contador harían dos viajes, el presupuesto de latencia
+sería imposible de acotar porque dependería de cuántas reglas se dispararan, y probar una regla
+exigiría simular su fuente de datos.
+
+Con este diseño cada regla es una **función pura**: los 131 tests corren en 6 segundos sin un
+solo contenedor, y el catálogo entero se puede reejecutar sobre datos históricos para recalibrar
+sin tocar infraestructura.
+
+### ADR-0008 — La capa de aplicación tampoco lleva anotaciones
+
+Ni `@Service` ni inyección por Spring. El cableado será un `@Bean` explícito en
+`infraestructura.config`. No es purismo: la lógica de degradación —qué hacer cuando el perfil no
+llega o los contadores fallan— es la parte más difícil de probar y la que más veces evita una
+caída. Sin anotaciones se prueba entera con JUnit y Mockito en milisegundos.
+
+Rectifica lo que decía este documento en la iteración 1.
+
+### ADR-0009 — La tarjeta no presente no genera señal
+
+Contraintuitivo: es el segmento con más fraude. Pero también es **el caso base del comercio
+electrónico**, y emitir una señal por ella suma el mismo aporte a casi todas las transacciones.
+Eso no discrimina entre buenas y malas, solo desplaza la distribución entera y obliga a subir
+todos los umbrales para compensar. Una regla que dispara siempre es una constante, no una señal.
+
+El riesgo de la tarjeta no presente se captura donde sí discrimina: dispositivo desconocido,
+país inusual, ráfaga y desviación de importe.
+
 ### ADR-0006 — Validación en dos anillos
 
 `jakarta.validation` vive en los DTO de los adaptadores de entrada, donde protege la frontera y
@@ -180,21 +268,25 @@ dos capas con propósitos distintos, no una duplicada.
 
 ---
 
-## Pendiente (iteración 2)
+## Pendiente (iteración 3)
 
-1. `EvaluadorDeFraudeService` implementando el puerto de entrada, con presupuesto de latencia y
-   ejecución concurrente de reglas independientes sobre virtual threads.
-2. Motor de reglas: `ReglaDeFraude` como interfaz de estrategia y el catálogo inicial (viaje
-   imposible, desviación de importe, ráfaga por dispositivo, MCC sensible, dispositivo nuevo).
-3. Adaptador de entrada Kafka con `DefaultErrorHandler`, reintentos con backoff y topic de
+1. Adaptador de entrada Kafka con `DefaultErrorHandler`, reintentos con backoff y topic de
    descartes.
-4. Adaptadores de salida: DynamoDB Enhanced (perfiles, auditoría) y ElastiCache (velocidad).
-5. `@RestControllerAdvice` con `ProblemDetail`, mapeando la jerarquía sellada de errores con un
+2. Adaptadores de salida: DynamoDB Enhanced (perfiles, auditoría) y ElastiCache (velocidad).
+3. `infraestructura.config`: los `@Bean` que montan `MotorDeReglas` y
+   `EvaluadorDeFraudeService`, y el mapeo de `centinela.motor.*` a
+   `ConfiguracionDelEvaluador`. Hasta que exista, el caso de uso no está cableado en el
+   contexto de Spring.
+4. `@RestControllerAdvice` con `ProblemDetail`, mapeando la jerarquía sellada de errores con un
    `switch` exhaustivo.
-6. Pruebas de integración con Testcontainers: Kafka y LocalStack (DynamoDB) mediante
+5. Pruebas de integración con Testcontainers: Kafka y LocalStack (DynamoDB) mediante
    `@ServiceConnection`.
-7. Umbrales de `NivelDeRiesgo` movidos a configuración versionada.
-8. Metadatos de reflexión para GraalVM y verificación del binario nativo.
+6. Actualización del perfil de comportamiento tras cada evaluación
+   (`RepositorioDePerfiles.guardar`, hoy declarado pero no invocado).
+7. Auditoría y publicación fuera del camino caliente, con outbox transaccional.
+8. Umbrales de `NivelDeRiesgo` movidos a `PoliticaDeRiesgo` cuando exista el adaptador de
+   configuración.
+9. Metadatos de reflexión para GraalVM y verificación del binario nativo.
 
 ---
 

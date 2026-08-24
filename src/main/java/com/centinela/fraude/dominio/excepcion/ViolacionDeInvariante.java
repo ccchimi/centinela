@@ -9,6 +9,9 @@ package com.centinela.fraude.dominio.excepcion;
  */
 public final class ViolacionDeInvariante extends ErrorDeDominio {
 
+    @java.io.Serial
+    private static final long serialVersionUID = 1L;
+
     public static final String CODIGO = "DOMINIO_INVARIANTE_VIOLADA";
 
     private ViolacionDeInvariante(String mensaje) {

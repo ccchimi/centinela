@@ -10,6 +10,9 @@ package com.centinela.fraude.dominio.excepcion;
  */
 public final class RecursoDeDominioNoEncontrado extends ErrorDeDominio {
 
+    @java.io.Serial
+    private static final long serialVersionUID = 1L;
+
     public static final String CODIGO = "DOMINIO_RECURSO_NO_ENCONTRADO";
 
     private final String tipo;

@@ -9,6 +9,9 @@ package com.centinela.fraude.dominio.excepcion;
  */
 public final class ReglaDeNegocioIncumplida extends ErrorDeDominio {
 
+    @java.io.Serial
+    private static final long serialVersionUID = 1L;
+
     private ReglaDeNegocioIncumplida(String codigo, String mensaje) {
         super(codigo, mensaje, null, true);
     }

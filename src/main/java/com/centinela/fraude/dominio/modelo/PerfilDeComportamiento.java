@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.util.Currency;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Retrato de la normalidad de un cliente: contra qué se compara una transacción para decidir si
@@ -51,7 +52,13 @@ public record PerfilDeComportamiento(
         Invariantes.exigir(
                 transaccionesObservadas >= 0, "perfil.transaccionesObservadas no puede ser negativo: %d", transaccionesObservadas);
 
-        paisesHabituales = Set.copyOf(Invariantes.noNulo(paisesHabituales, "perfil.paisesHabituales"));
+        // Los códigos de país se normalizan a mayúsculas aquí y no solo al consultarlos: si el
+        // conjunto guardara 'es' y la consulta buscara 'ES', esPaisHabitual devolvería false
+        // para el país de siempre del cliente y la regla de país inusual dispararía en cada
+        // operación. La normalización tiene que estar en el mismo sitio en los dos lados.
+        paisesHabituales = Invariantes.noNulo(paisesHabituales, "perfil.paisesHabituales").stream()
+                .map(pais -> Invariantes.paisIso2(pais, "perfil.paisesHabituales"))
+                .collect(Collectors.toUnmodifiableSet());
         comerciosHabituales = Set.copyOf(Invariantes.noNulo(comerciosHabituales, "perfil.comerciosHabituales"));
         dispositivosConocidos = Set.copyOf(Invariantes.noNulo(dispositivosConocidos, "perfil.dispositivosConocidos"));
 

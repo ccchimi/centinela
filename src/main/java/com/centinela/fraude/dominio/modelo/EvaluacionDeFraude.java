@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 /**
  * Veredicto del motor sobre una transacción, con la evidencia que lo sostiene.
@@ -18,6 +19,9 @@ import java.util.Optional;
  * posteriori el estado que produjo una decisión es imposible, hay que guardarlo.
  *
  * @param senales evidencia ordenada de mayor a menor aporte; puede estar vacía (transacción limpia)
+ * @param advertencias controles que no pudieron ejecutarse por falta de datos. Una evaluación
+ *     con advertencias es una evaluación con menos cobertura de la nominal, y distinguirla es lo
+ *     que impide que una caída de la caché de contadores se lea como "todo limpio"
  * @param latencia tiempo que tardó la evaluación, no el tiempo total del mensaje
  */
 public record EvaluacionDeFraude(
@@ -26,6 +30,7 @@ public record EvaluacionDeFraude(
         NivelDeRiesgo nivel,
         Decision decision,
         List<SenalDeRiesgo> senales,
+        List<String> advertencias,
         Instant evaluadaEn,
         Duration latencia) {
 
@@ -41,6 +46,7 @@ public record EvaluacionDeFraude(
         // Copia inmutable: el llamante conserva su lista y no puede mutar la evidencia después
         // de que la decisión esté tomada. List.copyOf además rechaza nulos dentro.
         senales = List.copyOf(Invariantes.noNulo(senales, "evaluacion.senales"));
+        advertencias = List.copyOf(Invariantes.noNulo(advertencias, "evaluacion.advertencias"));
 
         // Coherencia interna: el nivel tiene que ser el que corresponde al puntaje. Sin esta
         // guarda, un mapeo mal escrito en un adaptador podría persistir una evaluación cuyo
@@ -60,7 +66,11 @@ public record EvaluacionDeFraude(
      * el constructor canónico queda para la rehidratación desde persistencia.
      */
     public static EvaluacionDeFraude apartirDe(
-            IdTransaccion transaccion, List<SenalDeRiesgo> senales, Instant evaluadaEn, Duration latencia) {
+            IdTransaccion transaccion,
+            List<SenalDeRiesgo> senales,
+            List<String> advertencias,
+            Instant evaluadaEn,
+            Duration latencia) {
 
         Invariantes.noNulo(senales, "evaluacion.senales");
 
@@ -73,17 +83,38 @@ public record EvaluacionDeFraude(
                 .toList();
 
         return new EvaluacionDeFraude(
-                transaccion, puntaje, nivel, nivel.decisionPorDefecto(), ordenadas, evaluadaEn, latencia);
+                transaccion, puntaje, nivel, nivel.decisionPorDefecto(), ordenadas, advertencias, evaluadaEn, latencia);
+    }
+
+    /** Atajo para evaluaciones que se ejecutaron con cobertura completa. */
+    public static EvaluacionDeFraude apartirDe(
+            IdTransaccion transaccion, List<SenalDeRiesgo> senales, Instant evaluadaEn, Duration latencia) {
+        return apartirDe(transaccion, senales, List.of(), evaluadaEn, latencia);
     }
 
     /** Aplica un endurecimiento de la decisión (lista de bloqueo, orden judicial, regla dura). */
     public EvaluacionDeFraude conDecision(Decision nuevaDecision) {
         Invariantes.noNulo(nuevaDecision, "nuevaDecision");
-        return new EvaluacionDeFraude(transaccion, puntaje, nivel, nuevaDecision, senales, evaluadaEn, latencia);
+        return new EvaluacionDeFraude(
+                transaccion, puntaje, nivel, nuevaDecision, senales, advertencias, evaluadaEn, latencia);
+    }
+
+    /** Añade una advertencia, para el caso de uso que detecta un problema fuera del motor. */
+    public EvaluacionDeFraude conAdvertencia(String advertencia) {
+        Invariantes.textoConContenido(advertencia, "advertencia");
+        List<String> ampliadas =
+                Stream.concat(advertencias.stream(), Stream.of(advertencia)).toList();
+        return new EvaluacionDeFraude(
+                transaccion, puntaje, nivel, decision, senales, ampliadas, evaluadaEn, latencia);
     }
 
     public boolean bloqueada() {
         return decision.bloquea();
+    }
+
+    /** La evaluación se tomó con menos cobertura de la nominal. */
+    public boolean estaDegradada() {
+        return !advertencias.isEmpty();
     }
 
     /** Señal de mayor aporte, la que se muestra primero al analista. */
@@ -93,7 +124,7 @@ public record EvaluacionDeFraude(
 
     @Override
     public String toString() {
-        return "Evaluacion[tx=%s, puntaje=%s, nivel=%s, decision=%s, senales=%s, latencia=%d ms]"
-                .formatted(transaccion, puntaje, nivel, decision, senales, latencia.toMillis());
+        return "Evaluacion[tx=%s, puntaje=%s, nivel=%s, decision=%s, senales=%s, advertencias=%d, latencia=%d ms]"
+                .formatted(transaccion, puntaje, nivel, decision, senales, advertencias.size(), latencia.toMillis());
     }
 }

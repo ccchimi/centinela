@@ -97,6 +97,7 @@ class EvaluacionDeFraudeTest {
                         NivelDeRiesgo.BAJO,
                         Decision.APROBAR,
                         List.of(),
+                        List.of(),
                         ObjetosDePrueba.AHORA,
                         LATENCIA))
                 .isInstanceOf(ViolacionDeInvariante.class)

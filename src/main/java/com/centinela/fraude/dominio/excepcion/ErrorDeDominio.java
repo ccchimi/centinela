@@ -14,6 +14,9 @@ package com.centinela.fraude.dominio.excepcion;
 public sealed abstract class ErrorDeDominio extends RuntimeException
         permits ViolacionDeInvariante, ReglaDeNegocioIncumplida, RecursoDeDominioNoEncontrado {
 
+    @java.io.Serial
+    private static final long serialVersionUID = 1L;
+
     private final String codigo;
 
     /**

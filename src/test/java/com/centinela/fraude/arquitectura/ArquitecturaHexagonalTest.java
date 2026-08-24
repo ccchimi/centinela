@@ -65,6 +65,20 @@ class ArquitecturaHexagonalTest {
     }
 
     @Test
+    @DisplayName("la aplicación no depende de Spring, Kafka ni AWS")
+    void laAplicacionNoDependeDeInfraestructura() {
+        noClasses()
+                .that()
+                .resideInAPackage("..aplicacion..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage(
+                        "org.springframework..", "org.apache.kafka..", "software.amazon..", "jakarta..", "javax..")
+                .because("los casos de uso deben poder probarse con JUnit y Mockito, sin levantar un contexto")
+                .check(clases);
+    }
+
+    @Test
     @DisplayName("la aplicación no conoce los adaptadores")
     void laAplicacionNoConoceLosAdaptadores() {
         noClasses()
