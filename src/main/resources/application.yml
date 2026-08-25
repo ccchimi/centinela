@@ -56,7 +56,10 @@ spring:
       # registro con cabecera de error en vez de matar el contenedor en un bucle infinito.
       value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
       properties:
-        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        # JacksonJson*, no Json*: Spring Boot 4 trae Jackson 3 (tools.jackson) y las clases
+        # JsonDeserializer/JsonSerializer de spring-kafka siguen atadas a Jackson 2, que aquí
+        # sólo está en el classpath de test. Usarlas reventaría en runtime.
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
         # Sin cabeceras de tipo: el productor es un sistema externo que no las escribe, y
         # confiar en un tipo que viene en el mensaje sería una superficie de ataque.
         spring.json.use.type.headers: false
@@ -70,7 +73,7 @@ spring:
 
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
       acks: all
       properties:
         enable.idempotence: true
@@ -78,6 +81,12 @@ spring:
         compression.type: zstd
         # 5 ms de espera agrupan lotes sin comprometer el presupuesto de latencia.
         linger.ms: 5
+        # Kafka EXIGE delivery.timeout.ms >= linger.ms + request.timeout.ms, y si no se cumple
+        # el productor no se llega a construir: falla el primer envío, no el arranque. El valor
+        # por defecto de request.timeout.ms son 30 s, así que hay que bajarlo explícitamente.
+        # Además interesa por sí mismo: 30 s esperando a un broker caído es una eternidad para
+        # una decisión que ya se tomó.
+        request.timeout.ms: 10000
         delivery.timeout.ms: 30000
         spring.json.add.type.headers: false
 
@@ -123,9 +132,11 @@ centinela:
     dynamodb:
       tabla-perfiles: ${TABLA_PERFILES:centinela-perfiles}
       tabla-auditoria: ${TABLA_AUDITORIA:centinela-auditoria}
-      # Retención del rastro de auditoría, en días.
+      # Retención del rastro de auditoría, en días (7 años).
       retencion-auditoria-dias: 2555
     cliente:
+      # Ambos por debajo del presupuesto de latencia del motor: si el SDK tardara más, el
+      # presupuesto lo cortaría y toda evaluación saldría degradada por diseño.
       timeout-api-call: 120ms
       timeout-intento: 60ms
       max-reintentos: 2
@@ -138,17 +149,40 @@ centinela:
       # Las transacciones que no se pueden ni deserializar ni evaluar acaban aquí, nunca se
       # descartan: en fraude, un mensaje perdido es una autorización sin control.
       descartes: ${TOPIC_DESCARTES:fraude.transacciones.dlq.v1}
+      particiones: ${KAFKA_PARTICIONES:3}
+      factor-de-replicacion: ${KAFKA_REPLICAS:1}
+    reintentos:
+      # Reintentos ADEMÁS de la entrega original. Sólo aplican a fallos transitorios; los
+      # mensajes inválidos van directos a la cola de descartes.
+      intentos-maximos: 3
+      espera-inicial: 200ms
+      multiplicador: 2.0
+      espera-maxima: 2s
+      # Espera del acuse del broker al publicar una decisión.
+      timeout-de-publicacion: 5s
 
   motor:
-    # Presupuesto total de la evaluación. Al agotarse, el motor decide con las señales que ya
-    # tiene en lugar de esperar: llegar tarde a una autorización equivale a no responder.
+    # Presupuesto total de recolección de contexto. Al agotarse, el motor decide con las
+    # señales que ya tiene: llegar tarde a una autorización equivale a no responder.
     presupuesto-latencia: 150ms
-    # Ventana por defecto de los contadores de velocidad.
-    ventana-velocidad: 60s
-    # Desfase de reloj tolerado en la marca de tiempo del evento antes de considerarla inválida.
-    tolerancia-desfase-reloj: 5m
     # Moneda de referencia para perfiles de clientes sin historial.
     moneda-por-defecto: EUR
+
+    # ------------------------------------------------------------------------------------------
+    # Política de riesgo. Esto es calibración de negocio, no código: se recalibra cada pocas
+    # semanas mirando la tasa de falsos positivos y no puede exigir un despliegue.
+    # ------------------------------------------------------------------------------------------
+    politica:
+      version: v1-inicial
+      ventana-velocidad: 60s
+      max-transacciones-por-cliente-en-ventana: 8
+      max-intentos-por-dispositivo-en-ventana: 6
+      tolerancia-desfase-reloj: 5m
+      factor-desviacion-moderada: 5
+      factor-desviacion-alta: 10
+      factor-desviacion-extrema: 20
+      # Pesos por código de regla. Lo que no se declare usa el valor por defecto de la regla.
+      aportes: {}
 
 # ================================================================================================
 # Observabilidad

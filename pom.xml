@@ -74,35 +74,48 @@
     </dependency>
 
     <!-- ==================== Mensajeria ==================== -->
+    <!--
+      El starter, no 'spring-kafka' a secas. En Spring Boot 4 las autoconfiguraciones se
+      repartieron en modulos por tecnologia: sin spring-boot-starter-kafka no hay
+      KafkaAutoConfiguration, las propiedades spring.kafka.* se ignoran en silencio y no
+      existen los beans KafkaTemplate ni el contenedor de listeners.
+    -->
     <dependency>
-      <groupId>org.springframework.kafka</groupId>
-      <artifactId>spring-kafka</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-kafka</artifactId>
     </dependency>
 
     <!-- ==================== AWS (adaptadores de salida) ==================== -->
+    <!--
+      Cliente asincrono sobre Netty. Ver ADR-0002 en el README: se usa el mapeo manual a
+      AttributeValue en lugar de dynamodb-enhanced porque el mapeo por bean del enhanced
+      client necesita reflexion, y aqui todo el modelo son records con value objects que
+      requeririan un conversor por componente.
+    -->
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
-      <artifactId>dynamodb-enhanced</artifactId>
-      <exclusions>
-        <!--
-          Cliente sincrono + Virtual Threads: el stack reactivo de Netty solo suma
-          complejidad y peso de imagen nativa. Ver ADR-0002 en el README.
-        -->
-        <exclusion>
-          <groupId>software.amazon.awssdk</groupId>
-          <artifactId>netty-nio-client</artifactId>
-        </exclusion>
-      </exclusions>
+      <artifactId>dynamodb</artifactId>
     </dependency>
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
-      <artifactId>apache-client</artifactId>
+      <artifactId>netty-nio-client</artifactId>
     </dependency>
 
     <!-- Contadores de velocidad en ElastiCache (Valkey/Redis) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+    <!--
+      Requisito de spring.data.redis.lettuce.pool.enabled=true: el starter NO lo arrastra y sin
+      el, la fabrica de conexiones falla al arrancar con NoClassDefFoundError. El pool se usa
+      para acotar la latencia de cola: Lettuce multiplexa sobre una unica conexion y, con miles
+      de comandos concurrentes, el encolado en ese socket se nota en el percentil alto, que es
+      justo el que vive dentro de la ventana de autorizacion.
+    -->
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-pool2</artifactId>
     </dependency>
 
     <!-- ==================== Mapeo ==================== -->
@@ -124,8 +137,8 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>org.springframework.kafka</groupId>
-      <artifactId>spring-kafka-test</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-kafka-test</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>

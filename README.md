@@ -4,8 +4,8 @@ Motor de detección de fraude transaccional en tiempo real. Consume autorizacion
 las evalúa dentro del presupuesto de latencia de la autorización y emite un veredicto con la
 evidencia que lo sostiene.
 
-**Estado:** iteración 2 — dominio, motor de reglas y caso de uso completos y testeados
-(131 tests, sin contenedores). Sin adaptadores todavía.
+**Estado:** iteración 3 — sistema integrado de punta a punta. 131 tests unitarios (sin
+contenedores, ~6 s) + 19 de integración contra Kafka, LocalStack y Redis reales.
 
 ---
 
@@ -16,8 +16,8 @@ evidencia que lo sostiene.
 | Java | **25 LTS** (`java.version` en el POM) | Ver [ADR-0001](#adr-0001) |
 | Spring Boot | 4.1.1 | Spring Framework 7.0.9, Jackson 3.1.5 |
 | Spring Kafka | 4.1.1 | kafka-clients 4.2.1 |
-| AWS SDK for Java | 2.54.2 | DynamoDB Enhanced Client |
-| Testcontainers | 2.0.5 | Kafka + LocalStack |
+| AWS SDK for Java | 2.54.2 | `DynamoDbAsyncClient` sobre Netty |
+| Testcontainers | 2.0.5 | Kafka + LocalStack + Redis |
 | MapStruct | 1.6.3 | GA; 1.7.0 sigue en beta |
 | ArchUnit | 1.5.0 | reglas del hexágono como test |
 | GraalVM Native Build Tools | 1.1.8 | gestionado por el parent de Spring Boot |
@@ -31,8 +31,11 @@ Todas las versiones se comprobaron contra Maven Central el 2026-08-24 y son las 
 ## Arranque rápido
 
 ```bash
-./mvnw test
+./mvnw test      # 131 unitarios, sin Docker, ~6 s
+./mvnw verify    # + 19 de integración con contenedores reales, ~40 s
 ```
+
+Los tests de integración necesitan un demonio Docker en marcha.
 
 Compilación nativa (requiere GraalVM):
 
@@ -71,7 +74,12 @@ com.centinela.fraude
 │   └── compartido               guardas de invariantes
 ├── aplicacion                   ← Java plano + SLF4J, sin anotaciones de framework
 │   └── servicio                 EvaluadorDeFraudeService, ConfiguracionDelEvaluador
-└── infraestructura              ← adaptadores Kafka / DynamoDB / ElastiCache / REST (pendiente)
+└── infraestructura              ← la única capa que conoce Kafka, AWS y Spring
+    ├── adaptador.entrada.kafka  ConsumidorDeTransacciones, TransaccionEvento, traductor
+    ├── adaptador.salida.kafka   PublicadorDeDecisionesKafka, DecisionEvento
+    ├── adaptador.salida.dynamodb RepositorioDePerfiles y RegistroDeAuditoria (SDK asíncrono)
+    ├── adaptador.salida.redis   ContadorDeVelocidadRedis (script Lua atómico)
+    └── config                   propiedades tipadas y la raíz de composición
 ```
 
 La dirección de las dependencias **está verificada como test**
@@ -128,6 +136,45 @@ tomada con cobertura completa.
 
 ---
 
+## Flujo integrado
+
+```
+fraude.transacciones.v1                                        fraude.decisiones.v1
+        │                                                              ▲
+        ▼                                                              │
+ ConsumidorDeTransacciones ──► Traductor ──► EvaluarTransaccionUseCase ┤
+        │ (ack manual tras                          │                  │
+        │  auditar y publicar)                      ├──► DynamoDB: perfil (lectura)
+        │                                           ├──► Redis: contadores (INCR atómico)
+        ▼ fallo                                     └──► DynamoDB: auditoría (TTL 7 años)
+ DefaultErrorHandler
+   ├── transitorio ──► reintento exponencial con jitter (3 intentos)
+   └── no reintentable ──► fraude.transacciones.dlq.v1
+```
+
+### Qué se reintenta y qué no
+
+Un fallo transitorio —DynamoDB con un pico, el broker recolocando particiones— merece
+reintentos con espera creciente y jitter. Un mensaje malformado, no: reintentarlo mantiene la
+partición bloqueada durante todo el backoff y retrasa a las transacciones legítimas que vienen
+detrás. `EventoInvalidoException` y `ViolacionDeInvariante` se declaran no reintentables y van
+directas a la cola de descartes.
+
+### La cola de descartes conserva la evidencia
+
+Un mensaje llega a la DLQ por dos caminos y el valor no es el mismo:
+
+- **Falló la deserialización** → se republican los **bytes originales** tal cual. Son la única
+  evidencia de qué mandó el emisor; volver a serializarlos la destruiría.
+- **Falló la validación o la evaluación** → el valor es el DTO ya deserializado y se publica
+  como JSON legible.
+
+`SerializadorDeDescartes` distingue los dos casos con un `switch` sobre patrones. Al triar la
+DLQ, el tipo real del error está en la cabecera `kafka_dlt-exception-cause-fqcn`; la de primer
+nivel es siempre el envoltorio de Spring Kafka.
+
+---
+
 ## Decisiones de arquitectura
 
 ### ADR-0001 — Java 25 LTS como línea base, no Java 26
@@ -153,15 +200,20 @@ dominio compila igual en ambas.
 > nativo de producción contra ella es deuda garantizada. La ejecución concurrente de reglas se
 > hará con virtual threads y `ExecutorService`, que es API final.
 
-### ADR-0002 — Cliente AWS síncrono sobre virtual threads, no cliente asíncrono
+### ADR-0002 — Cliente AWS asíncrono, mapeo manual a `AttributeValue`
 
-Se excluye `netty-nio-client` y se usa `apache-client` con `DynamoDbClient` síncrono. Con
-`spring.threads.virtual.enabled: true`, bloquear en una llamada a DynamoDB cuesta lo que cuesta
-aparcar un hilo virtual, y a cambio el código de las reglas se lee de arriba abajo en vez de
-encadenar `CompletableFuture`. Desde JEP 491 (Java 24) ni siquiera `synchronized` fija el hilo
-portador, que era la última objeción real a este enfoque.
+*Revisa la decisión de la iteración 1, que había optado por el cliente síncrono.*
 
-Beneficio secundario: menos dependencias en la imagen nativa.
+Se usa `DynamoDbAsyncClient` sobre `netty-nio-client`. El puerto sigue siendo síncrono y el
+adaptador hace `join()`, lo cual con hilos virtuales cuesta aparcar un hilo. Lo que aporta el
+cliente asíncrono aquí es **control fino de tiempos**: `apiCallTimeout` acota la llamada
+completa con sus reintentos y `apiCallAttemptTimeout` cada intento, ambos por debajo del
+presupuesto de latencia del motor, sin necesidad de un pool propio que los vigile.
+
+No se usa `dynamodb-enhanced`. Su mapeo por bean necesita reflexión —mala compañera de la
+imagen nativa— y aquí todo el modelo son records con value objects (`Dinero`, `Optional`,
+conjuntos) que exigirían un conversor por componente: más código que el mapeo manual, y menos
+explícito. La forma de cada tabla vive en un único fichero por agregado.
 
 ### ADR-0003 — Particionado de Kafka por cliente
 
@@ -236,6 +288,19 @@ todos los umbrales para compensar. Una regla que dispara siempre es una constant
 El riesgo de la tarjeta no presente se captura donde sí discrimina: dispositivo desconocido,
 país inusual, ráfaga y desviación de importe.
 
+### ADR-0010 — Los tiempos de producción no se relajan en `application.yml`
+
+Los tests de integración sobrescriben `centinela.aws.cliente.*` y
+`centinela.motor.presupuesto-latencia` con valores holgados. Los del YAML —120 ms de llamada,
+150 ms de presupuesto— están calculados para DynamoDB en la misma zona de disponibilidad;
+LocalStack a través de la red de Docker es uno o dos órdenes de magnitud más lento y con ellos
+toda evaluación saldría degradada por timeout.
+
+Lo que **no** se hace es subir el valor en `application.yml` para que los tests pasen. El
+presupuesto de latencia es un requisito del producto, y aflojarlo por conveniencia de la suite
+convierte una garantía en un número decorativo. Los tests de integración verifican corrección;
+la latencia se mide en un entorno con la topología real.
+
 ### ADR-0006 — Validación en dos anillos
 
 `jakarta.validation` vive en los DTO de los adaptadores de entrada, donde protege la frontera y
@@ -268,25 +333,25 @@ dos capas con propósitos distintos, no una duplicada.
 
 ---
 
-## Pendiente (iteración 3)
+## Pendiente (iteración 4)
 
-1. Adaptador de entrada Kafka con `DefaultErrorHandler`, reintentos con backoff y topic de
-   descartes.
-2. Adaptadores de salida: DynamoDB Enhanced (perfiles, auditoría) y ElastiCache (velocidad).
-3. `infraestructura.config`: los `@Bean` que montan `MotorDeReglas` y
-   `EvaluadorDeFraudeService`, y el mapeo de `centinela.motor.*` a
-   `ConfiguracionDelEvaluador`. Hasta que exista, el caso de uso no está cableado en el
-   contexto de Spring.
-4. `@RestControllerAdvice` con `ProblemDetail`, mapeando la jerarquía sellada de errores con un
-   `switch` exhaustivo.
-5. Pruebas de integración con Testcontainers: Kafka y LocalStack (DynamoDB) mediante
-   `@ServiceConnection`.
-6. Actualización del perfil de comportamiento tras cada evaluación
-   (`RepositorioDePerfiles.guardar`, hoy declarado pero no invocado).
-7. Auditoría y publicación fuera del camino caliente, con outbox transaccional.
-8. Umbrales de `NivelDeRiesgo` movidos a `PoliticaDeRiesgo` cuando exista el adaptador de
-   configuración.
-9. Metadatos de reflexión para GraalVM y verificación del binario nativo.
+1. Adaptador REST de entrada y `@RestControllerAdvice` con `ProblemDetail`, mapeando la
+   jerarquía sellada de errores con un `switch` exhaustivo.
+2. **Actualización del perfil tras cada evaluación.** `RepositorioDePerfiles.guardar` está
+   implementado y probado, pero el caso de uso todavía no lo invoca: los perfiles hay que
+   sembrarlos por fuera. Es la pieza que falta para que el motor aprenda solo.
+3. **Outbox transaccional** para auditoría y publicación. Hoy ambas están en el camino caliente
+   y el publicador espera el acuse del broker; funciona y es correcto, pero suma latencia
+   dentro de la ventana de autorización.
+4. **Hueco conocido:** si la publicación de la decisión falla, el caso de uso lo registra y el
+   consumidor confirma igualmente, así que esa decisión se pierde. Se resuelve con el outbox.
+5. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
+   el umbral puede repartir la ráfaga a caballo de dos ventanas y colar hasta el doble.
+6. Umbrales de `NivelDeRiesgo` movidos a `PoliticaDeRiesgo` (los pesos de las reglas ya están
+   en configuración; las bandas siguen siendo constantes del enum).
+7. Métricas de negocio en Micrometer: tasa por decisión, reglas disparadas, evaluaciones
+   degradadas, latencia por percentil.
+8. Metadatos de reflexión para GraalVM y verificación del binario nativo.
 
 ---
 
@@ -295,6 +360,8 @@ dos capas con propósitos distintos, no una duplicada.
 - El aviso `The following options were not recognized by any processor:
   '[mapstruct.unmappedTargetPolicy, mapstruct.defaultComponentModel]'` es esperado mientras no
   exista ningún `@Mapper`; desaparece con el primer mapper.
-- `spring.json.value.default.type` en `application.yml` apunta a
-  `...adaptador.entrada.kafka.TransaccionEvento`, que llega en la iteración 2. La propiedad es
-  inerte hasta que exista un listener.
+- Los tests de integración requieren Docker. Sin demonio, `./mvnw verify` falla al arrancar los
+  contenedores; `./mvnw test` sigue funcionando.
+- Los contenedores se declaran como `@Bean` en `ContenedoresDeIntegracion` y todas las clases de
+  integración comparten la misma configuración de contexto a propósito: así el caché de
+  contextos de Spring Test los reutiliza y arrancan una sola vez para toda la suite.
