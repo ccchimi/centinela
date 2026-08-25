@@ -151,7 +151,7 @@ spring:
 # ================================================================================================
 centinela:
   aws:
-    region: ${AWS_REGION:eu-west-1}
+    region: ${AWS_REGION:us-east-1}
     # Vacío en AWS real; apuntado a LocalStack en el perfil 'local' y en los tests.
     endpoint-override: ${AWS_ENDPOINT_OVERRIDE:}
     dynamodb:

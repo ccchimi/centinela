@@ -56,7 +56,7 @@ module "mensajeria" {
 #   aws secretsmanager put-secret-value \
 #     --secret-id centinela-prod-api-key \
 #     --secret-string "$(openssl rand -base64 32)" \
-#     --region sa-east-1
+#     --region us-east-1
 #
 # El ciclo de vida ignora la versión para que un `apply` posterior no la pise.
 # -------------------------------------------------------------------------------------------------

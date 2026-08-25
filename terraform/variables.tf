@@ -1,7 +1,7 @@
 variable "region" {
-  description = "Región de AWS. sa-east-1 (São Paulo) tiene DynamoDB, ElastiCache, ECR, ECS, MSK, Secrets Manager y ELB."
+  description = "Región de AWS. us-east-1 (Norte de Virginia) tiene DynamoDB, ElastiCache, ECR, ECS, MSK, Secrets Manager y ELB."
   type        = string
-  default     = "sa-east-1"
+  default     = "us-east-1"
 }
 
 variable "entorno" {
@@ -32,7 +32,7 @@ variable "zonas_de_disponibilidad" {
     quedarse sin quórum porque una zona tenga un mal día.
   EOT
   type        = list(string)
-  default     = ["sa-east-1a", "sa-east-1b", "sa-east-1c"]
+  default     = ["us-east-1a", "us-east-1b", "us-east-1c"]
 }
 
 # -------------------------------------------------------------------------------------------------

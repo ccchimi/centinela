@@ -361,7 +361,7 @@ Validado con `terraform validate` y `terraform fmt` contra el provider AWS 6.x.
    lo generara, acabaría en el estado de Terraform en claro.
 
 ```bash
-aws secretsmanager put-secret-value --secret-id centinela-prod-api-key --secret-string "$(openssl rand -base64 32)" --region sa-east-1
+aws secretsmanager put-secret-value --secret-id centinela-prod-api-key --secret-string "$(openssl rand -base64 32)" --region us-east-1
 ```
 
 ### Por qué MSK Serverless

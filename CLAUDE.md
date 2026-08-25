@@ -37,5 +37,6 @@ Dos matices propios de Centinela:
   arriba prefiere CDK/CloudFormation; aquí se eligió Terraform por decisión explícita. Vive en
   `terraform/` y está validada con `terraform validate` y `fmt`. La intención de la regla —IaC
   antes que comandos sueltos— se cumple igual.
-- **La región del proyecto es `sa-east-1`**; el Agent Toolkit opera desde `us-east-1` con
-  independencia de eso, que es lo esperado.
+- **La región del proyecto es `us-east-1`** (Norte de Virginia). Se movió desde `sa-east-1` para
+  aprovechar el Free Tier. Coincide con la región desde la que opera el Agent Toolkit, pero son
+  cosas independientes: la del proyecto la fija `var.region` en `terraform/variables.tf`.

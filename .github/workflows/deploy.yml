@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REGION_AWS: sa-east-1
+  REGION_AWS: us-east-1
   REPOSITORIO_ECR: centinela-prod
   CLUSTER_ECS: centinela-prod
   SERVICIO_ECS: centinela-prod
