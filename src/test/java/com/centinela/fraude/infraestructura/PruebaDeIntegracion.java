@@ -61,6 +61,10 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
             "centinela.aws.cliente.timeout-api-call=10s",
             "centinela.aws.cliente.timeout-intento=5s",
             "centinela.motor.presupuesto-latencia=10s",
+            // Relevo del outbox agresivo: los tests esperan a que la decisión llegue a Kafka y
+            // con el intervalo de producción (500 ms) cada aserción arrastraría medio segundo.
+            "centinela.motor.bandeja.intervalo-de-relevo=100ms",
+            "centinela.motor.bandeja.retraso-inicial=0ms",
             "logging.level.com.centinela.fraude=DEBUG"
         })
 @Import(ContenedoresDeIntegracion.class)

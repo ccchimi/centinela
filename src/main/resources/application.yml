@@ -15,6 +15,12 @@ spring:
   main:
     banner-mode: "off"
 
+  mvc:
+    problemdetails:
+      # Hace que también las excepciones propias de Spring MVC (405, 415, cuerpo ilegible...)
+      # salgan como Problem Details. Sin esto convivirían dos formatos de error en la misma API.
+      enabled: true
+
   threads:
     virtual:
       # El motor es masivamente concurrente y sus operaciones son de E/S (DynamoDB,
@@ -63,8 +69,8 @@ spring:
         # Sin cabeceras de tipo: el productor es un sistema externo que no las escribe, y
         # confiar en un tipo que viene en el mensaje sería una superficie de ataque.
         spring.json.use.type.headers: false
-        spring.json.value.default.type: com.centinela.fraude.infraestructura.adaptador.entrada.kafka.TransaccionEvento
-        spring.json.trusted.packages: com.centinela.fraude.infraestructura.adaptador.entrada.kafka
+        spring.json.value.default.type: com.centinela.fraude.infraestructura.adaptador.entrada.contrato.TransaccionEvento
+        spring.json.trusted.packages: com.centinela.fraude.infraestructura.adaptador.entrada.contrato
         # Debe superar con holgura (presupuesto de latencia x max-poll-records) o el consumidor
         # se expulsa del grupo justo cuando más carga hay.
         max.poll.interval.ms: 60000
@@ -132,6 +138,10 @@ centinela:
     dynamodb:
       tabla-perfiles: ${TABLA_PERFILES:centinela-perfiles}
       tabla-auditoria: ${TABLA_AUDITORIA:centinela-auditoria}
+      # Bandeja de salida (outbox). Vive en su propia tabla y no como atributo de la auditoría
+      # porque el relevo consulta un índice disperso sobre ella y la auditoría se retiene siete
+      # años: mezclarlas ataría el coste del relevo al histórico completo.
+      tabla-bandeja: ${TABLA_BANDEJA:centinela-bandeja-salida}
       # Retención del rastro de auditoría, en días (7 años).
       retencion-auditoria-dias: 2555
     cliente:
@@ -167,6 +177,18 @@ centinela:
     presupuesto-latencia: 150ms
     # Moneda de referencia para perfiles de clientes sin historial.
     moneda-por-defecto: EUR
+
+    # ------------------------------------------------------------------------------------------
+    # Relevo de la bandeja de salida (patrón outbox). Kafka ya no está en el camino caliente:
+    # la decisión se asienta con su obligación de publicarse y este relevo la cumple aparte.
+    # ------------------------------------------------------------------------------------------
+    bandeja:
+      tamano-de-lote: 50
+      intentos-antes-de-alertar: 5
+      # Compromiso entre latencia de publicación y presión sobre DynamoDB: cada ciclo es una
+      # consulta al índice de pendientes, aunque no haya nada que hacer.
+      intervalo-de-relevo: 500ms
+      retraso-inicial: 2s
 
     # ------------------------------------------------------------------------------------------
     # Política de riesgo. Esto es calibración de negocio, no código: se recalibra cada pocas

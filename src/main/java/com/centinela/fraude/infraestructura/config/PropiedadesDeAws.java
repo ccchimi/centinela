@@ -31,7 +31,10 @@ public record PropiedadesDeAws(
      *     solo, que es la única forma sensata de cumplir una retención regulatoria sin un batch
      */
     public record DynamoDb(
-            @NotBlank String tablaPerfiles, @NotBlank String tablaAuditoria, @Positive int retencionAuditoriaDias) {}
+            @NotBlank String tablaPerfiles,
+            @NotBlank String tablaAuditoria,
+            @NotBlank String tablaBandeja,
+            @Positive int retencionAuditoriaDias) {}
 
     /**
      * @param timeoutApiCall techo de la llamada completa, reintentos incluidos. Tiene que caber

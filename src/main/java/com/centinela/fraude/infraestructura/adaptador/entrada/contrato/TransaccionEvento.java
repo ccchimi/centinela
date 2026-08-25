@@ -1,4 +1,4 @@
-package com.centinela.fraude.infraestructura.adaptador.entrada.kafka;
+package com.centinela.fraude.infraestructura.adaptador.entrada.contrato;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.validation.Valid;

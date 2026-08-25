@@ -4,8 +4,9 @@ Motor de detección de fraude transaccional en tiempo real. Consume autorizacion
 las evalúa dentro del presupuesto de latencia de la autorización y emite un veredicto con la
 evidencia que lo sostiene.
 
-**Estado:** iteración 3 — sistema integrado de punta a punta. 131 tests unitarios (sin
-contenedores, ~6 s) + 19 de integración contra Kafka, LocalStack y Redis reales.
+**Estado:** iteración 4 — sin huecos abiertos. Ciclo de aprendizaje cerrado, outbox
+transaccional y API REST con Problem Details. 163 tests unitarios (sin contenedores, ~7 s) + 26
+de integración contra Kafka, LocalStack y Redis reales.
 
 ---
 
@@ -31,9 +32,20 @@ Todas las versiones se comprobaron contra Maven Central el 2026-08-24 y son las 
 ## Arranque rápido
 
 ```bash
-./mvnw test      # 131 unitarios, sin Docker, ~6 s
-./mvnw verify    # + 19 de integración con contenedores reales, ~40 s
+./mvnw test      # 163 unitarios, sin Docker, ~7 s
+./mvnw verify    # + 26 de integración con contenedores reales, ~45 s
 ```
+
+API REST (además del consumo por Kafka):
+
+```
+POST /api/v1/evaluaciones              evalúa una transacción y devuelve el veredicto
+GET  /api/v1/evaluaciones/{idTx}       rastro de auditoría de una decisión
+GET  /api/v1/perfiles/{idCliente}      perfil de comportamiento (sólo lectura)
+```
+
+Los errores salen como Problem Details (RFC 9457) con un `codigo` estable pensado para
+programar contra él, en lugar de parsear el texto.
 
 Los tests de integración necesitan un demonio Docker en marcha.
 
@@ -75,11 +87,14 @@ com.centinela.fraude
 ├── aplicacion                   ← Java plano + SLF4J, sin anotaciones de framework
 │   └── servicio                 EvaluadorDeFraudeService, ConfiguracionDelEvaluador
 └── infraestructura              ← la única capa que conoce Kafka, AWS y Spring
-    ├── adaptador.entrada.kafka  ConsumidorDeTransacciones, TransaccionEvento, traductor
-    ├── adaptador.salida.kafka   PublicadorDeDecisionesKafka, DecisionEvento
-    ├── adaptador.salida.dynamodb RepositorioDePerfiles y RegistroDeAuditoria (SDK asíncrono)
-    ├── adaptador.salida.redis   ContadorDeVelocidadRedis (script Lua atómico)
-    └── config                   propiedades tipadas y la raíz de composición
+    ├── adaptador.entrada.contrato  TransaccionEvento y su traductor, compartidos por los dos
+    │                               adaptadores de entrada
+    ├── adaptador.entrada.kafka     ConsumidorDeTransacciones
+    ├── adaptador.entrada.rest      controladores + manejadores de Problem Details
+    ├── adaptador.salida.kafka      PublicadorDeDecisionesKafka, DecisionEvento
+    ├── adaptador.salida.dynamodb   perfiles, acta de decisiones y bandeja de salida
+    ├── adaptador.salida.redis      ContadorDeVelocidadRedis (script Lua atómico)
+    └── config                      propiedades tipadas y la raíz de composición
 ```
 
 La dirección de las dependencias **está verificada como test**
@@ -139,18 +154,29 @@ tomada con cobertura completa.
 ## Flujo integrado
 
 ```
-fraude.transacciones.v1                                        fraude.decisiones.v1
-        │                                                              ▲
-        ▼                                                              │
- ConsumidorDeTransacciones ──► Traductor ──► EvaluarTransaccionUseCase ┤
-        │ (ack manual tras                          │                  │
-        │  auditar y publicar)                      ├──► DynamoDB: perfil (lectura)
-        │                                           ├──► Redis: contadores (INCR atómico)
-        ▼ fallo                                     └──► DynamoDB: auditoría (TTL 7 años)
+fraude.transacciones.v1        POST /api/v1/evaluaciones
+        │                              │
+        ▼                              ▼
+ ConsumidorDeTransacciones ─► Traductor ─► EvaluarTransaccionUseCase
+        │ (ack manual)                          │
+        │                                       ├─► DynamoDB: perfil (lectura)
+        │                                       ├─► Redis: contadores (INCR atómico)
+        │                                       ├─► DynamoDB: ACTA (auditoría + outbox,
+        │                                       │              una sola transacción)
+        ▼ fallo                                 └─► DynamoDB: perfil (aprendizaje, v+1)
  DefaultErrorHandler
    ├── transitorio ──► reintento exponencial con jitter (3 intentos)
    └── no reintentable ──► fraude.transacciones.dlq.v1
+
+ RelevoDeBandejaDeSalida (@Scheduled, cada 500 ms)
+   └─► índice disperso de pendientes ──► publica ──► fraude.decisiones.v1
+                                          └─ sólo al acusar el broker: REMOVE estado
 ```
+
+**Kafka ya no está en el camino caliente.** El caso de uso asienta la decisión y termina; la
+publicación la hace el relevo aparte. Eso quita la espera del acuse del broker de la ventana de
+autorización y, sobre todo, elimina el hueco por el que se perdía una decisión cuando la
+publicación fallaba después de haber confirmado el mensaje de entrada.
 
 ### Qué se reintenta y qué no
 
@@ -301,6 +327,58 @@ presupuesto de latencia es un requisito del producto, y aflojarlo por convenienc
 convierte una garantía en un número decorativo. Los tests de integración verifican corrección;
 la latencia se mide en un entorno con la topología real.
 
+### ADR-0011 — La atomicidad gana a la segregación de interfaces
+
+`RegistroDeAuditoria` y `PublicadorDeDecisiones` eran dos puertos separados invocando ISP:
+auditar y publicar tienen garantías y motivos de cambio distintos. El razonamiento era correcto
+y el resultado tenía un agujero — entre "he auditado" y "he publicado" cabe una caída, y la
+decisión se perdía sin que nadie se enterase.
+
+El outbox exige que el hecho y la promesa de contarlo caigan juntos o no caiga ninguno, y eso
+obliga a que sea **una** escritura. Ahora es un solo puerto, `ActaDeDecisiones`, implementado
+con `TransactWriteItems` de DynamoDB sobre las dos tablas. Una interfaz algo más ancha es un
+problema de diseño; una decisión de fraude perdida es un problema de negocio.
+
+`PublicadorDeDecisiones` sigue existiendo, pero ya no lo usa el caso de uso: lo usa el relevo.
+
+### ADR-0012 — Bloqueo optimista por contador, no por marca temporal
+
+La primera versión condicionaba la escritura del perfil a `actualizadoEn < :nuevo`. Falla en el
+caso que importa: dos evaluaciones concurrentes del mismo cliente caben de sobra en el mismo
+milisegundo, y ahí una comparación por fecha no distingue nada.
+
+Ahora el perfil lleva `version` y la escritura condiciona a `version = :anterior`. En conflicto,
+el repositorio lanza `ConflictoDeVersion` y el caso de uso relee y reintenta **una** vez; si
+vuelve a chocar, abandona. Perder una actualización de perfil es aceptable —la siguiente
+transacción la reincorpora—; sobrescribir el aprendizaje de otra evaluación, no.
+
+### ADR-0013 — El perfil sólo aprende de lo que se aprobó sin fricción
+
+`PerfilDeComportamiento.aprendiendoDe` devuelve vacío si la decisión fue rechazar, desafiar o
+revisar. Sin esa guarda, un motor que aprende solo es entrenable por el atacante: bastaría con
+colar una compra desde Tokio para que Japón pasara a ser país habitual y la siguiente ya no
+disparara.
+
+Dos guardas más, en el caso de uso:
+
+- **Sólo si la lectura del perfil fue concluyente.** Escribir a partir del perfil provisional que
+  se usa al degradar sustituiría el historial real de un cliente de años por uno en blanco. Un
+  pico de latencia de DynamoDB borraría comportamiento aprendido.
+- **Nunca propaga.** Un fallo al realimentar no puede tumbar una autorización.
+
+Limitación conocida: un `DESAFIAR` que el titular supera legítimamente tampoco enseña nada,
+porque el resultado de la autenticación no vuelve a este motor.
+
+### ADR-0014 — Índice disperso para la bandeja de salida
+
+El relevo pregunta "¿qué queda por publicar?" muchas veces por segundo. Se resuelve con un GSI
+cuya clave de partición es `estado`: mientras la entrada está pendiente el atributo existe;
+al publicarla se **elimina** y la entrada desaparece del índice sola.
+
+Con un booleano `publicado` el índice contendría el histórico completo de decisiones y el coste
+del relevo crecería para siempre. Con el atributo ausente, el coste es proporcional a lo que
+queda por hacer.
+
 ### ADR-0006 — Validación en dos anillos
 
 `jakarta.validation` vive en los DTO de los adaptadores de entrada, donde protege la frontera y
@@ -333,25 +411,23 @@ dos capas con propósitos distintos, no una duplicada.
 
 ---
 
-## Pendiente (iteración 4)
+## Pendiente
 
-1. Adaptador REST de entrada y `@RestControllerAdvice` con `ProblemDetail`, mapeando la
-   jerarquía sellada de errores con un `switch` exhaustivo.
-2. **Actualización del perfil tras cada evaluación.** `RepositorioDePerfiles.guardar` está
-   implementado y probado, pero el caso de uso todavía no lo invoca: los perfiles hay que
-   sembrarlos por fuera. Es la pieza que falta para que el motor aprenda solo.
-3. **Outbox transaccional** para auditoría y publicación. Hoy ambas están en el camino caliente
-   y el publicador espera el acuse del broker; funciona y es correcto, pero suma latencia
-   dentro de la ventana de autorización.
-4. **Hueco conocido:** si la publicación de la decisión falla, el caso de uso lo registra y el
-   consumidor confirma igualmente, así que esa decisión se pierde. Se resuelve con el outbox.
-5. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
+Los huecos que arrastraba el diseño están cerrados. Lo que queda es optimización y alcance:
+
+1. **GraalVM**: metadatos de reflexión y verificación del binario nativo (siguiente iteración).
+2. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
    el umbral puede repartir la ráfaga a caballo de dos ventanas y colar hasta el doble.
-6. Umbrales de `NivelDeRiesgo` movidos a `PoliticaDeRiesgo` (los pesos de las reglas ya están
-   en configuración; las bandas siguen siendo constantes del enum).
-7. Métricas de negocio en Micrometer: tasa por decisión, reglas disparadas, evaluaciones
-   degradadas, latencia por percentil.
-8. Metadatos de reflexión para GraalVM y verificación del binario nativo.
+3. Arrendamiento por entrada en la bandeja de salida. Hoy dos relevos concurrentes pueden
+   publicar la misma decisión; se acepta porque la entrega ya es al-menos-una-vez y los
+   consumidores deduplican por identificador de transacción.
+4. Umbrales de `NivelDeRiesgo` movidos a `PoliticaDeRiesgo` (los pesos de las reglas ya están en
+   configuración; las bandas siguen siendo constantes del enum).
+5. Métricas de negocio en Micrometer: tasa por decisión, reglas disparadas, evaluaciones
+   degradadas, profundidad de la bandeja de salida, latencia por percentil.
+6. Realimentar el desenlace de un `DESAFIAR`, que hoy no vuelve al motor (ver ADR-0013).
+7. Autenticación y autorización de la API REST. Los endpoints de consulta exponen datos de
+   fraude y hoy están abiertos.
 
 ---
 

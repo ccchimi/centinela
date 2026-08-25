@@ -1,4 +1,4 @@
-package com.centinela.fraude.infraestructura.adaptador.entrada.kafka;
+package com.centinela.fraude.infraestructura.adaptador.entrada.contrato;
 
 import com.centinela.fraude.dominio.excepcion.ErrorDeDominio;
 import com.centinela.fraude.dominio.modelo.Transaccion;
@@ -11,9 +11,9 @@ import com.centinela.fraude.dominio.modelo.vo.IdDispositivo;
 import com.centinela.fraude.dominio.modelo.vo.IdTransaccion;
 import com.centinela.fraude.dominio.modelo.vo.InstrumentoDePago;
 import com.centinela.fraude.dominio.modelo.vo.MarcaDeTarjeta;
-import com.centinela.fraude.infraestructura.adaptador.entrada.kafka.TransaccionEvento.ComercioEvento;
-import com.centinela.fraude.infraestructura.adaptador.entrada.kafka.TransaccionEvento.GeolocalizacionEvento;
-import com.centinela.fraude.infraestructura.adaptador.entrada.kafka.TransaccionEvento.InstrumentoEvento;
+import com.centinela.fraude.infraestructura.adaptador.entrada.contrato.TransaccionEvento.ComercioEvento;
+import com.centinela.fraude.infraestructura.adaptador.entrada.contrato.TransaccionEvento.GeolocalizacionEvento;
+import com.centinela.fraude.infraestructura.adaptador.entrada.contrato.TransaccionEvento.InstrumentoEvento;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
 import java.util.Arrays;

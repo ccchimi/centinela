@@ -26,7 +26,23 @@ import org.springframework.validation.annotation.Validated;
 @Validated
 @ConfigurationProperties("centinela.motor")
 public record PropiedadesDelMotor(
-        @NotNull Duration presupuestoLatencia, @NotBlank String monedaPorDefecto, @NotNull @Valid Politica politica) {
+        @NotNull Duration presupuestoLatencia,
+        @NotBlank String monedaPorDefecto,
+        @NotNull @Valid Politica politica,
+        @NotNull @Valid Bandeja bandeja) {
+
+    /**
+     * Ajustes del relevo del outbox.
+     *
+     * @param tamanoDeLote cuántas decisiones publica un ciclo; acota lo que puede tardar
+     * @param intentosAntesDeAlertar a partir de aquí, un fallo de publicación deja de ser ruido
+     *     y pasa a ser un incidente: alguien aguas abajo lleva ese tiempo sin enterarse
+     */
+    public record Bandeja(
+            @Positive int tamanoDeLote,
+            @Positive int intentosAntesDeAlertar,
+            @NotNull Duration intervaloDeRelevo,
+            @NotNull Duration retrasoInicial) {}
 
     /**
      * @param aportes peso por código de regla; lo ausente usa el valor por defecto de la regla

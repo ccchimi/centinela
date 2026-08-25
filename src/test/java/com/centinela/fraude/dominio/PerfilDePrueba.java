@@ -36,6 +36,7 @@ public final class PerfilDePrueba {
     private long transacciones = 250;
     private Optional<Instant> ultimaActividad = Optional.of(ObjetosDePrueba.AHORA.minusSeconds(3600));
     private Optional<Geolocalizacion> ultimaPosicion = Optional.of(ObjetosDePrueba.madrid());
+    private long version = 7;
 
     private PerfilDePrueba() {}
 
@@ -102,6 +103,11 @@ public final class PerfilDePrueba {
         return this;
     }
 
+    public PerfilDePrueba enVersion(long version) {
+        this.version = version;
+        return this;
+    }
+
     public PerfilDePrueba sinPosicionPrevia() {
         this.ultimaPosicion = Optional.empty();
         this.ultimaActividad = Optional.empty();
@@ -119,6 +125,7 @@ public final class PerfilDePrueba {
                 transacciones,
                 ultimaActividad,
                 ultimaPosicion,
-                ObjetosDePrueba.AHORA);
+                ObjetosDePrueba.AHORA,
+                version);
     }
 }

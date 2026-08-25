@@ -1,7 +1,9 @@
 package com.centinela.fraude.infraestructura;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.centinela.fraude.dominio.excepcion.ConflictoDeVersion;
 import com.centinela.fraude.dominio.modelo.Decision;
 import com.centinela.fraude.dominio.modelo.EvaluacionDeFraude;
 import com.centinela.fraude.dominio.modelo.PerfilDeComportamiento;
@@ -13,17 +15,18 @@ import com.centinela.fraude.dominio.modelo.vo.Geolocalizacion;
 import com.centinela.fraude.dominio.modelo.vo.IdCliente;
 import com.centinela.fraude.dominio.modelo.vo.IdDispositivo;
 import com.centinela.fraude.dominio.modelo.vo.IdTransaccion;
+import com.centinela.fraude.dominio.puerto.salida.ActaDeDecisiones;
+import com.centinela.fraude.dominio.puerto.salida.BandejaDeSalida;
 import com.centinela.fraude.dominio.puerto.salida.ContadorDeVelocidad;
-import com.centinela.fraude.dominio.puerto.salida.RegistroDeAuditoria;
 import com.centinela.fraude.dominio.puerto.salida.RepositorioDePerfiles;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Currency;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -33,8 +36,8 @@ import org.springframework.beans.factory.annotation.Autowired;
  * Los adaptadores de salida contra sus servicios reales.
  *
  * <p>Comprueba lo que un test con mocks no puede: que el mapeo sobrevive a una ida y vuelta por
- * DynamoDB, que la escritura condicionada realmente evita que dos escrituras concurrentes se
- * pisen, y que el contador de Redis expira solo.
+ * DynamoDB, que el bloqueo optimista de verdad rechaza la segunda escritura, que la escritura
+ * transaccional del outbox deja las dos filas o ninguna, y que el contador de Redis expira solo.
  */
 @DisplayName("Adaptadores de salida")
 class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
@@ -45,7 +48,10 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
     private RepositorioDePerfiles perfiles;
 
     @Autowired
-    private RegistroDeAuditoria auditoria;
+    private ActaDeDecisiones acta;
+
+    @Autowired
+    private BandejaDeSalida bandeja;
 
     @Autowired
     private ContadorDeVelocidad contadores;
@@ -58,7 +64,7 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
         @DisplayName("el perfil sobrevive intacto a una ida y vuelta")
         void idaYVuelta() {
             IdCliente cliente = IdCliente.de("cli-" + UUID.randomUUID());
-            PerfilDeComportamiento original = perfilDe(cliente, AHORA);
+            PerfilDeComportamiento original = perfilDe(cliente, AHORA, 1L);
 
             perfiles.guardar(original);
 
@@ -73,17 +79,22 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
         }
 
         @Test
-        @DisplayName("una escritura más antigua no pisa a una más reciente")
-        void laEscrituraCondicionadaProtegeLosAgregados() {
-            // El escenario real: dos evaluaciones concurrentes del mismo cliente calculan su
-            // perfil desde la misma base. Sin la condición, la que termina última gana aunque
-            // sus datos sean más viejos, y los agregados retroceden.
+        @DisplayName("el bloqueo optimista rechaza una escritura calculada sobre una base vieja")
+        void bloqueoOptimista() {
+            // El escenario real: dos evaluaciones concurrentes del mismo cliente leen la versión
+            // 3 y ambas calculan la 4. La primera gana; la segunda tiene que chocar, no
+            // sobrescribir en silencio el aprendizaje de la primera.
             IdCliente cliente = IdCliente.de("cli-" + UUID.randomUUID());
-            PerfilDeComportamiento reciente = perfilDe(cliente, AHORA);
-            PerfilDeComportamiento antiguo = perfilDe(cliente, AHORA.minusSeconds(60));
+            perfiles.guardar(perfilDe(cliente, AHORA.minusSeconds(120), 3L));
 
-            perfiles.guardar(reciente);
-            perfiles.guardar(antiguo); // se descarta en silencio: es lo correcto
+            PerfilDeComportamiento primera = perfilDe(cliente, AHORA, 4L);
+            PerfilDeComportamiento segunda = perfilDe(cliente, AHORA.plusSeconds(1), 4L);
+
+            perfiles.guardar(primera);
+
+            assertThatThrownBy(() -> perfiles.guardar(segunda))
+                    .isInstanceOf(ConflictoDeVersion.class)
+                    .satisfies(e -> assertThat(((ConflictoDeVersion) e).versionEsperada()).isEqualTo(3L));
 
             assertThat(perfiles.buscarPor(cliente))
                     .get()
@@ -96,7 +107,7 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
         void opcionalesAusentes() {
             IdCliente cliente = IdCliente.de("cli-" + UUID.randomUUID());
             PerfilDeComportamiento sinHistorial =
-                    PerfilDeComportamiento.nuevoPara(cliente, java.util.Currency.getInstance("EUR"), AHORA);
+                    PerfilDeComportamiento.nuevoPara(cliente, Currency.getInstance("EUR"), AHORA);
 
             perfiles.guardar(sinHistorial);
 
@@ -107,20 +118,33 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
                         assertThat(perfil.ultimaActividad()).isEmpty();
                         assertThat(perfil.paisesHabituales()).isEmpty();
                         assertThat(perfil.esFiable()).isFalse();
+                        assertThat(perfil.version()).isZero();
                     });
         }
     }
 
     @Nested
-    @DisplayName("RegistroDeAuditoria sobre DynamoDB")
-    class Auditoria {
+    @DisplayName("ActaDeDecisiones y bandeja de salida")
+    class Acta {
+
+        @Test
+        @DisplayName("asentar deja la auditoría y la entrada pendiente en la misma transacción")
+        void asientoAtomico() {
+            EvaluacionDeFraude evaluacion = evaluacionDePrueba();
+
+            acta.asentar(evaluacion);
+
+            assertThat(acta.buscarPor(evaluacion.transaccion())).contains(evaluacion);
+            assertThat(pendientesDe(evaluacion.transaccion()))
+                    .as("la decisión debería estar esperando publicación")
+                    .isPresent();
+        }
 
         @Test
         @DisplayName("la evaluación se reconstruye con sus señales y advertencias")
         void idaYVuelta() {
-            IdTransaccion transaccion = IdTransaccion.de("tx-" + UUID.randomUUID());
             EvaluacionDeFraude original = EvaluacionDeFraude.apartirDe(
-                    transaccion,
+                    IdTransaccion.de("tx-" + UUID.randomUUID()),
                     List.of(
                             SenalDeRiesgo.de("VIAJE_IMPOSIBLE", "Desplazamiento no factible", 400),
                             SenalDeRiesgo.de("PAIS_INUSUAL", "Origen en JP", 120)),
@@ -128,25 +152,65 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
                     AHORA,
                     Duration.ofMillis(37));
 
-            auditoria.registrar(original);
+            acta.asentar(original);
 
-            assertThat(auditoria.buscarPor(transaccion)).contains(original);
+            assertThat(acta.buscarPor(original.transaccion())).contains(original);
         }
 
         @Test
-        @DisplayName("registrar dos veces la misma decisión no la duplica")
+        @DisplayName("asentar dos veces la misma decisión no la duplica")
         void esIdempotente() {
             // Con entrega al-menos-una-vez, reprocesar el mismo mensaje tras un reinicio tiene
             // que ser inocuo.
-            IdTransaccion transaccion = IdTransaccion.de("tx-" + UUID.randomUUID());
-            EvaluacionDeFraude evaluacion =
-                    EvaluacionDeFraude.apartirDe(transaccion, List.of(), AHORA, Duration.ofMillis(5));
+            EvaluacionDeFraude evaluacion = evaluacionDePrueba();
 
-            auditoria.registrar(evaluacion);
-            auditoria.registrar(evaluacion);
+            acta.asentar(evaluacion);
+            acta.asentar(evaluacion);
 
-            assertThat(auditoria.buscarPor(transaccion)).contains(evaluacion);
-            assertThat(auditoria.buscarPor(transaccion).orElseThrow().decision()).isEqualTo(Decision.APROBAR);
+            assertThat(acta.buscarPor(evaluacion.transaccion())).contains(evaluacion);
+            assertThat(acta.buscarPor(evaluacion.transaccion()).orElseThrow().decision())
+                    .isEqualTo(Decision.APROBAR);
+        }
+
+        @Test
+        @DisplayName("marcar publicada la saca del índice de pendientes")
+        void marcarPublicadaLaRetira() {
+            EvaluacionDeFraude evaluacion = evaluacionDePrueba();
+            acta.asentar(evaluacion);
+            assertThat(pendientesDe(evaluacion.transaccion())).isPresent();
+
+            bandeja.marcarPublicada(evaluacion);
+
+            // Lo que se comprueba aquí es que el índice es realmente disperso: al eliminar el
+            // atributo de estado la entrada desaparece del índice, no se queda dentro con otro
+            // valor. Si se quedara, el coste del relevo crecería con todo el histórico.
+            assertThat(pendientesDe(evaluacion.transaccion())).isEmpty();
+        }
+
+        @Test
+        @DisplayName("un intento fallido incrementa el contador sin sacarla de pendientes")
+        void intentoFallidoNoLaRetira() {
+            EvaluacionDeFraude evaluacion = evaluacionDePrueba();
+            acta.asentar(evaluacion);
+
+            bandeja.registrarIntentoFallido(evaluacion, "broker no disponible");
+            bandeja.registrarIntentoFallido(evaluacion, "broker no disponible");
+
+            assertThat(pendientesDe(evaluacion.transaccion()))
+                    .get()
+                    .extracting(BandejaDeSalida.Pendiente::intentos)
+                    .isEqualTo(2);
+        }
+
+        private Optional<BandejaDeSalida.Pendiente> pendientesDe(IdTransaccion transaccion) {
+            return bandeja.pendientes(200).stream()
+                    .filter(p -> p.evaluacion().transaccion().equals(transaccion))
+                    .findFirst();
+        }
+
+        private EvaluacionDeFraude evaluacionDePrueba() {
+            return EvaluacionDeFraude.apartirDe(
+                    IdTransaccion.de("tx-" + UUID.randomUUID()), List.of(), AHORA, Duration.ofMillis(5));
         }
     }
 
@@ -199,9 +263,8 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
             int hilos = 50;
 
             try (var ejecutor = Executors.newVirtualThreadPerTaskExecutor()) {
-                List<Future<Long>> resultados = ejecutor.invokeAll(java.util.Collections.nCopies(
+                var resultados = ejecutor.invokeAll(java.util.Collections.nCopies(
                         hilos, () -> contadores.incrementarYContar(clave, Duration.ofMinutes(1))));
-
                 assertThat(resultados).hasSize(hilos);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -216,7 +279,7 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
         }
     }
 
-    private static PerfilDeComportamiento perfilDe(IdCliente cliente, Instant actualizadoEn) {
+    private static PerfilDeComportamiento perfilDe(IdCliente cliente, Instant actualizadoEn, long version) {
         return new PerfilDeComportamiento(
                 cliente,
                 Dinero.de("100.00", "EUR"),
@@ -227,6 +290,7 @@ class AdaptadoresDeSalidaIT extends PruebaDeIntegracion {
                 250L,
                 Optional.of(AHORA.minusSeconds(3600)),
                 Optional.of(Geolocalizacion.de(40.4168, -3.7038, "ES")),
-                actualizadoEn);
+                actualizadoEn,
+                version);
     }
 }

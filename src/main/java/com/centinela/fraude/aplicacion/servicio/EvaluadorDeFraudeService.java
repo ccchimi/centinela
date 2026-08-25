@@ -1,14 +1,14 @@
 package com.centinela.fraude.aplicacion.servicio;
 
 import com.centinela.fraude.dominio.compartido.Invariantes;
+import com.centinela.fraude.dominio.excepcion.ConflictoDeVersion;
 import com.centinela.fraude.dominio.modelo.EvaluacionDeFraude;
 import com.centinela.fraude.dominio.modelo.PerfilDeComportamiento;
 import com.centinela.fraude.dominio.modelo.Transaccion;
 import com.centinela.fraude.dominio.modelo.vo.ClaveDeVelocidad;
 import com.centinela.fraude.dominio.puerto.entrada.EvaluarTransaccionUseCase;
+import com.centinela.fraude.dominio.puerto.salida.ActaDeDecisiones;
 import com.centinela.fraude.dominio.puerto.salida.ContadorDeVelocidad;
-import com.centinela.fraude.dominio.puerto.salida.PublicadorDeDecisiones;
-import com.centinela.fraude.dominio.puerto.salida.RegistroDeAuditoria;
 import com.centinela.fraude.dominio.puerto.salida.RepositorioDePerfiles;
 import com.centinela.fraude.dominio.regla.ContextoDeEvaluacion;
 import com.centinela.fraude.dominio.regla.MotorDeReglas;
@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -36,42 +37,43 @@ import org.slf4j.LoggerFactory;
  *
  * <h2>Qué hace y qué no</h2>
  *
- * Orquesta, no decide. Reúne el contexto, invoca el motor y difunde el resultado; ninguna regla
- * de fraude vive aquí. Si mañana el catálogo cambia entero, esta clase no se toca.
+ * Orquesta, no decide. Reúne el contexto, invoca el motor, asienta el resultado y realimenta el
+ * perfil; ninguna regla de fraude vive aquí. Si mañana el catálogo cambia entero, esta clase no
+ * se toca.
  *
  * <h2>Sin anotaciones</h2>
  *
- * No hay {@code @Service} ni inyección por framework. El cableado será un {@code @Bean} en
+ * No hay {@code @Service} ni inyección por framework. El cableado es un {@code @Bean} en
  * {@code infraestructura.config}. El motivo no es purismo: así el caso de uso completo —que es
  * donde vive la lógica de degradación, la más difícil de probar y la que más veces salva una
  * caída— se prueba con JUnit y Mockito en milisegundos, sin levantar un contexto.
  *
- * <h2>Concurrencia</h2>
+ * <h2>Concurrencia y presupuesto</h2>
  *
  * El perfil y los contadores se piden a la vez sobre hilos virtuales, así que la latencia de
- * E/S es el máximo de las dos y no la suma. Las reglas, en cambio, se ejecutan en serie: son
- * funciones puras de coste microscópico y repartirlas costaría más en coordinación de lo que
- * ahorraría.
+ * E/S es el máximo de las dos y no la suma. Las reglas se ejecutan en serie: son funciones puras
+ * de coste microscópico. Kafka ya no aparece en este camino: la decisión se asienta junto con su
+ * obligación de publicarse y un relevo en segundo plano la saca.
  *
  * <h2>Degradación en lugar de excepción</h2>
  *
  * El contrato del puerto es total: toda transacción válida recibe una evaluación. Si el perfil
  * no llega a tiempo, se evalúa con un perfil vacío; si los contadores fallan, las reglas de
  * ráfaga se declaran degradadas. En un motor en línea, propagar la excepción equivaldría a
- * bloquear una autorización legítima porque una caché tuvo un mal segundo.
- *
- * <p>Cada degradación queda registrada en {@link EvaluacionDeFraude#advertencias()}, de modo
- * que una decisión tomada a ciegas es distinguible de una tomada con cobertura completa.
+ * bloquear una autorización legítima porque una caché tuvo un mal segundo. Cada degradación
+ * queda en {@link EvaluacionDeFraude#advertencias()}.
  */
 public final class EvaluadorDeFraudeService implements EvaluarTransaccionUseCase, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(EvaluadorDeFraudeService.class);
 
+    /** Un solo reintento ante conflicto: si vuelve a chocar, otra evaluación ya está aprendiendo. */
+    private static final int REINTENTOS_DE_PERFIL = 1;
+
     private final MotorDeReglas motor;
     private final RepositorioDePerfiles perfiles;
     private final ContadorDeVelocidad contadores;
-    private final RegistroDeAuditoria auditoria;
-    private final PublicadorDeDecisiones publicador;
+    private final ActaDeDecisiones acta;
     private final ConfiguracionDelEvaluador configuracion;
     private final Clock reloj;
     private final ExecutorService ejecutor;
@@ -80,15 +82,13 @@ public final class EvaluadorDeFraudeService implements EvaluarTransaccionUseCase
             MotorDeReglas motor,
             RepositorioDePerfiles perfiles,
             ContadorDeVelocidad contadores,
-            RegistroDeAuditoria auditoria,
-            PublicadorDeDecisiones publicador,
+            ActaDeDecisiones acta,
             ConfiguracionDelEvaluador configuracion,
             Clock reloj) {
         this.motor = Invariantes.noNulo(motor, "motor");
         this.perfiles = Invariantes.noNulo(perfiles, "repositorio de perfiles");
         this.contadores = Invariantes.noNulo(contadores, "contador de velocidad");
-        this.auditoria = Invariantes.noNulo(auditoria, "registro de auditoría");
-        this.publicador = Invariantes.noNulo(publicador, "publicador de decisiones");
+        this.acta = Invariantes.noNulo(acta, "acta de decisiones");
         this.configuracion = Invariantes.noNulo(configuracion, "configuración");
         this.reloj = Invariantes.noNulo(reloj, "reloj");
         // Un ejecutor de hilo virtual por tarea no tiene pool que dimensionar ni cola que
@@ -109,21 +109,21 @@ public final class EvaluadorDeFraudeService implements EvaluarTransaccionUseCase
 
         Set<ClaveDeVelocidad> claves = motor.contadoresNecesarios(transaccion);
 
-        Future<PerfilDeComportamiento> futuroPerfil = ejecutor.submit(() -> cargarPerfil(transaccion, evaluadoEn));
+        Future<PerfilCargado> futuroPerfil = ejecutor.submit(() -> cargarPerfil(transaccion, evaluadoEn));
         Future<Map<ClaveDeVelocidad, Long>> futuroContadores = ejecutor.submit(() -> resolverContadores(claves));
 
-        PerfilDeComportamiento perfil = esperar(
+        PerfilCargado perfilCargado = esperar(
                 futuroPerfil,
                 inicioNanos,
                 "perfil de comportamiento",
                 advertencias,
-                () -> perfilVacioPara(transaccion, evaluadoEn));
+                () -> PerfilCargado.noDisponible(perfilVacioPara(transaccion, evaluadoEn)));
 
         Map<ClaveDeVelocidad, Long> valores =
                 esperar(futuroContadores, inicioNanos, "contadores de velocidad", advertencias, Map::of);
 
-        ContextoDeEvaluacion contexto =
-                new ContextoDeEvaluacion(transaccion, perfil, valores, configuracion.politica(), evaluadoEn);
+        ContextoDeEvaluacion contexto = new ContextoDeEvaluacion(
+                transaccion, perfilCargado.perfil(), valores, configuracion.politica(), evaluadoEn);
         ResultadoDelMotor resultado = motor.ejecutar(contexto);
         advertencias.addAll(resultado.advertencias());
 
@@ -134,8 +134,8 @@ public final class EvaluadorDeFraudeService implements EvaluarTransaccionUseCase
                 evaluadoEn,
                 Duration.ofNanos(System.nanoTime() - inicioNanos));
 
-        registrar(evaluacion, transaccion);
-        publicar(evaluacion, transaccion);
+        asentar(evaluacion, transaccion);
+        realimentarPerfil(perfilCargado, transaccion, evaluacion, evaluadoEn);
 
         if (evaluacion.estaDegradada()) {
             log.warn(
@@ -155,12 +155,32 @@ public final class EvaluadorDeFraudeService implements EvaluarTransaccionUseCase
     // Recolección del contexto
     // -------------------------------------------------------------------------------------
 
-    private PerfilDeComportamiento cargarPerfil(Transaccion transaccion, Instant evaluadoEn) {
-        return perfiles.buscarPor(transaccion.cliente())
+    /**
+     * Perfil del cliente y si la lectura fue concluyente.
+     *
+     * <p>La distinción no es cosmética. Un perfil vacío puede significar dos cosas opuestas:
+     * "este cliente es nuevo" o "no pude leer su perfil". Sólo en el primer caso se puede
+     * escribir de vuelta; hacerlo en el segundo <strong>sobrescribiría el historial real con uno
+     * en blanco</strong>, y bastaría un pico de latencia de DynamoDB para borrarle a un cliente
+     * de años su comportamiento aprendido.
+     */
+    private record PerfilCargado(PerfilDeComportamiento perfil, boolean lecturaConcluyente) {
+
+        static PerfilCargado leido(PerfilDeComportamiento perfil) {
+            return new PerfilCargado(perfil, true);
+        }
+
+        static PerfilCargado noDisponible(PerfilDeComportamiento provisional) {
+            return new PerfilCargado(provisional, false);
+        }
+    }
+
+    private PerfilCargado cargarPerfil(Transaccion transaccion, Instant evaluadoEn) {
+        return PerfilCargado.leido(perfiles.buscarPor(transaccion.cliente())
                 // Un perfil de otro cliente significa un error de clave en el adaptador. Es
                 // preferible evaluar a ciegas que evaluar contra la normalidad de un tercero.
                 .filter(perfil -> perfil.cliente().equals(transaccion.cliente()))
-                .orElseGet(() -> perfilVacioPara(transaccion, evaluadoEn));
+                .orElseGet(() -> perfilVacioPara(transaccion, evaluadoEn)));
     }
 
     private PerfilDeComportamiento perfilVacioPara(Transaccion transaccion, Instant evaluadoEn) {
@@ -230,39 +250,92 @@ public final class EvaluadorDeFraudeService implements EvaluarTransaccionUseCase
     }
 
     // -------------------------------------------------------------------------------------
-    // Difusión del resultado
+    // Asiento y realimentación
     // -------------------------------------------------------------------------------------
 
     /**
-     * Auditar y publicar ocurren después de que la decisión esté tomada, y por eso ninguno de
-     * los dos puede propagar. Que no se haya podido escribir el rastro no cambia el veredicto
-     * que ya se comunicó al autorizador; lo que hace falta es que salte una alarma, no que se
-     * caiga la transacción.
+     * Asentar no puede propagar: la decisión ya está tomada y el llamante la necesita. Que no se
+     * haya podido escribir el acta no cambia el veredicto; lo que hace falta es que salte una
+     * alarma, no que se caiga la autorización.
      *
-     * <p>Siguen en el camino caliente en esta iteración. Cuando existan los adaptadores pasarán
-     * a un outbox transaccional para sacarlos del presupuesto de latencia.
+     * <p>Sigue siendo el punto que más duele si falla: sin acta no hay auditoría ni publicación.
+     * Por eso se registra a nivel ERROR y con la transacción identificada.
      */
-    private void registrar(EvaluacionDeFraude evaluacion, Transaccion transaccion) {
+    private void asentar(EvaluacionDeFraude evaluacion, Transaccion transaccion) {
         try {
-            auditoria.registrar(evaluacion);
+            acta.asentar(evaluacion);
         } catch (RuntimeException e) {
             log.error(
-                    "No se pudo auditar la decisión {} de {}: {}",
+                    "No se pudo asentar la decisión {} de {}: la decisión no se auditará ni se publicará. {}",
                     evaluacion.decision(),
                     transaccion.descripcionSegura(),
                     e.toString());
         }
     }
 
-    private void publicar(EvaluacionDeFraude evaluacion, Transaccion transaccion) {
+    /**
+     * Incorpora la transacción al perfil del cliente para que la próxima evaluación sepa más.
+     *
+     * <p>Es el bucle que hace que el motor aprenda solo, y tiene tres guardas:
+     *
+     * <ul>
+     *   <li><strong>Sólo si la lectura fue concluyente.</strong> Escribir a partir de un perfil
+     *       provisional borraría el historial real.
+     *   <li><strong>Sólo si se aprobó sin fricción.</strong> Lo decide el propio dominio en
+     *       {@code aprendiendoDe}: aprender de lo que se sospechó dejaría que un atacante
+     *       entrenara el perfil a su favor.
+     *   <li><strong>Nunca propaga.</strong> Perder una actualización es aceptable, la siguiente
+     *       transacción la vuelve a incorporar; abortar una autorización por ello, no.
+     * </ul>
+     */
+    private void realimentarPerfil(
+            PerfilCargado cargado, Transaccion transaccion, EvaluacionDeFraude evaluacion, Instant evaluadoEn) {
+
+        if (!cargado.lecturaConcluyente()) {
+            log.debug(
+                    "No se realimenta el perfil de {}: la lectura no fue concluyente",
+                    transaccion.cliente().enmascarado());
+            return;
+        }
+
+        PerfilDeComportamiento base = cargado.perfil();
+        for (int intento = 0; intento <= REINTENTOS_DE_PERFIL; intento++) {
+            Optional<PerfilDeComportamiento> aprendido =
+                    base.aprendiendoDe(transaccion, evaluacion.decision(), evaluadoEn);
+            if (aprendido.isEmpty()) {
+                return;
+            }
+            try {
+                perfiles.guardar(aprendido.orElseThrow());
+                return;
+            } catch (ConflictoDeVersion e) {
+                // Otra evaluación del mismo cliente ganó la carrera. Releer y recalcular sobre
+                // su resultado es lo correcto; si vuelve a chocar, se abandona: alguien más
+                // está aprendiendo de ese cliente y esta transacción no se pierde de verdad,
+                // sólo tarda una operación más en reflejarse.
+                if (intento == REINTENTOS_DE_PERFIL) {
+                    log.debug("Se abandona la realimentación del perfil de {} tras un conflicto", base.cliente());
+                    return;
+                }
+                Optional<PerfilDeComportamiento> releido = leerParaReintento(transaccion);
+                if (releido.isEmpty()) {
+                    return;
+                }
+                base = releido.orElseThrow();
+            } catch (RuntimeException e) {
+                log.warn("No se pudo realimentar el perfil de {}: {}", base.cliente(), e.toString());
+                return;
+            }
+        }
+    }
+
+    private Optional<PerfilDeComportamiento> leerParaReintento(Transaccion transaccion) {
         try {
-            publicador.publicar(evaluacion);
+            return perfiles.buscarPor(transaccion.cliente())
+                    .filter(perfil -> perfil.cliente().equals(transaccion.cliente()));
         } catch (RuntimeException e) {
-            log.error(
-                    "No se pudo publicar la decisión {} de {}: {}",
-                    evaluacion.decision(),
-                    transaccion.descripcionSegura(),
-                    e.toString());
+            log.warn("No se pudo releer el perfil para reintentar la realimentación: {}", e.toString());
+            return Optional.empty();
         }
     }
 

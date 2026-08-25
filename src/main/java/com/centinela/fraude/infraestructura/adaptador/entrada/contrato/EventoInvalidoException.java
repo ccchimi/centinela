@@ -1,4 +1,4 @@
-package com.centinela.fraude.infraestructura.adaptador.entrada.kafka;
+package com.centinela.fraude.infraestructura.adaptador.entrada.contrato;
 
 import java.io.Serial;
 

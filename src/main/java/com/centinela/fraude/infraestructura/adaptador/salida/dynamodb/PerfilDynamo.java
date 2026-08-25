@@ -33,6 +33,7 @@ final class PerfilDynamo {
     private static final String ULTIMA_ACTIVIDAD = "ultimaActividad";
     private static final String ULTIMA_POSICION = "ultimaPosicion";
     static final String ACTUALIZADO_EN = "actualizadoEn";
+    static final String VERSION = "version";
 
     private static final String IMPORTE = "importe";
     private static final String MONEDA = "moneda";
@@ -58,6 +59,7 @@ final class PerfilDynamo {
                 Atributos.lista(perfil.dispositivosConocidos(), d -> Atributos.texto(d.huella())));
         item.put(TRANSACCIONES, Atributos.numero(perfil.transaccionesObservadas()));
         item.put(ACTUALIZADO_EN, Atributos.momento(perfil.actualizadoEn()));
+        item.put(VERSION, Atributos.numero(perfil.version()));
 
         // Los opcionales se omiten en vez de escribirse como NULL: un atributo ausente ocupa
         // cero y las expresiones de condición pueden preguntar por attribute_not_exists.
@@ -79,7 +81,8 @@ final class PerfilDynamo {
                     Atributos.numeroLargo(item, TRANSACCIONES),
                     Atributos.momentoOpcional(item, ULTIMA_ACTIVIDAD),
                     Atributos.mapaOpcional(item, ULTIMA_POSICION).map(PerfilDynamo::aPosicion),
-                    Atributos.momento(item, ACTUALIZADO_EN));
+                    Atributos.momento(item, ACTUALIZADO_EN),
+                    Atributos.numeroLargo(item, VERSION));
         } catch (ErrorDeDominio e) {
             // El item existe pero no cumple las invariantes del modelo. Traducir el error a uno
             // de infraestructura evita que parezca que el problema está en la transacción que

@@ -38,6 +38,17 @@ final class EvaluacionDynamo {
     }
 
     static Map<String, AttributeValue> aItem(EvaluacionDeFraude evaluacion, Duration retencion) {
+        Map<String, AttributeValue> item = new HashMap<>(aItemSinExpiracion(evaluacion));
+        // El TTL de DynamoDB se expresa en segundos epoch, no en millis.
+        item.put(EXPIRA_EN, Atributos.numero(evaluacion.evaluadaEn().plus(retencion).getEpochSecond()));
+        return Map.copyOf(item);
+    }
+
+    /**
+     * El cuerpo de la evaluación, sin expiración. La bandeja de salida lo reutiliza: sus
+     * entradas viven lo que tardan en publicarse, no siete años, así que no llevan TTL.
+     */
+    static Map<String, AttributeValue> aItemSinExpiracion(EvaluacionDeFraude evaluacion) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(CLAVE, Atributos.texto(evaluacion.transaccion().valor()));
         item.put(PUNTAJE, Atributos.numero(evaluacion.puntaje().valor()));
@@ -49,8 +60,6 @@ final class EvaluacionDynamo {
         // Microsegundos y no milisegundos: el presupuesto de latencia son 150 ms y guardar la
         // medida redondeada a milisegundos perdería casi toda la resolución del percentil bajo.
         item.put(LATENCIA_MICROS, Atributos.numero(evaluacion.latencia().toNanos() / 1_000));
-        // El TTL de DynamoDB se expresa en segundos epoch, no en millis.
-        item.put(EXPIRA_EN, Atributos.numero(evaluacion.evaluadaEn().plus(retencion).getEpochSecond()));
         return Map.copyOf(item);
     }
 

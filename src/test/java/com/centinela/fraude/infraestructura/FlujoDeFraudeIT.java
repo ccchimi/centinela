@@ -10,7 +10,7 @@ import com.centinela.fraude.dominio.modelo.vo.Geolocalizacion;
 import com.centinela.fraude.dominio.modelo.vo.IdCliente;
 import com.centinela.fraude.dominio.modelo.vo.IdDispositivo;
 import com.centinela.fraude.dominio.modelo.vo.IdTransaccion;
-import com.centinela.fraude.dominio.puerto.salida.RegistroDeAuditoria;
+import com.centinela.fraude.dominio.puerto.salida.ActaDeDecisiones;
 import com.centinela.fraude.dominio.puerto.salida.RepositorioDePerfiles;
 import java.time.Instant;
 import java.util.Optional;
@@ -42,7 +42,7 @@ class FlujoDeFraudeIT extends PruebaDeIntegracion {
     private RepositorioDePerfiles perfiles;
 
     @Autowired
-    private RegistroDeAuditoria auditoria;
+    private ActaDeDecisiones acta;
 
     @Test
     @DisplayName("una compra habitual de un cliente conocido se aprueba y queda auditada")
@@ -68,7 +68,7 @@ class FlujoDeFraudeIT extends PruebaDeIntegracion {
         assertThat(decision.get("versionDePolitica").asString()).isEqualTo("v1-inicial");
 
         // Y el rastro de auditoría existe con el mismo veredicto.
-        Optional<EvaluacionDeFraude> auditada = auditoria.buscarPor(IdTransaccion.de(transaccion));
+        Optional<EvaluacionDeFraude> auditada = acta.buscarPor(IdTransaccion.de(transaccion));
         assertThat(auditada).isPresent();
         assertThat(auditada.orElseThrow().decision()).isEqualTo(Decision.APROBAR);
         assertThat(auditada.orElseThrow().latencia()).isPositive();
@@ -105,7 +105,7 @@ class FlujoDeFraudeIT extends PruebaDeIntegracion {
                         "DESVIACION_DE_IMPORTE",
                         "COMERCIO_ALTO_RIESGO");
 
-        assertThat(auditoria.buscarPor(IdTransaccion.de(transaccion)))
+        assertThat(acta.buscarPor(IdTransaccion.de(transaccion)))
                 .get()
                 .satisfies(evaluacion -> assertThat(evaluacion.bloqueada()).isTrue());
     }
@@ -209,7 +209,8 @@ class FlujoDeFraudeIT extends PruebaDeIntegracion {
                 250L,
                 Optional.of(AHORA.minusSeconds(3600)),
                 Optional.of(Geolocalizacion.de(40.4168, -3.7038, "ES")),
-                AHORA.minusSeconds(3600)));
+                AHORA.minusSeconds(3600),
+                0L));
 
         // Comprobación de ida y vuelta contra DynamoDB real: si el mapeo perdiera un campo, el
         // resto de este test fallaría por un motivo confuso.

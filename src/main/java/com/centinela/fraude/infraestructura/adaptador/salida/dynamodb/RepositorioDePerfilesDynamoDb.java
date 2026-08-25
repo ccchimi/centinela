@@ -1,5 +1,6 @@
 package com.centinela.fraude.infraestructura.adaptador.salida.dynamodb;
 
+import com.centinela.fraude.dominio.excepcion.ConflictoDeVersion;
 import com.centinela.fraude.dominio.modelo.PerfilDeComportamiento;
 import com.centinela.fraude.dominio.modelo.vo.IdCliente;
 import com.centinela.fraude.dominio.puerto.salida.RepositorioDePerfiles;
@@ -60,45 +61,51 @@ public final class RepositorioDePerfilesDynamoDb implements RepositorioDePerfile
         return item == null || item.isEmpty() ? Optional.empty() : Optional.of(PerfilDynamo.aDominio(item));
     }
 
+    /**
+     * Escritura con bloqueo optimista por número de versión.
+     *
+     * <p>El perfil recibido ya viene con {@code version + 1}, así que la condición comprueba que
+     * la fila siga en la versión anterior. Dos evaluaciones concurrentes del mismo cliente leen
+     * la misma base y calculan la misma versión nueva: la primera en llegar gana y la segunda
+     * choca, en vez de sobrescribir en silencio el aprendizaje de la primera.
+     *
+     * <p>Se compara un contador y no {@code actualizadoEn} porque dos evaluaciones del mismo
+     * cliente caben de sobra en el mismo milisegundo, y ahí una comparación por fecha no
+     * distingue nada.
+     */
     @Override
     public void guardar(PerfilDeComportamiento perfil) {
+        long versionAnterior = perfil.version() - 1;
+
         PutItemRequest peticion = PutItemRequest.builder()
                 .tableName(tabla)
                 .item(PerfilDynamo.aItem(perfil))
-                // Escritura condicionada por marca temporal: dos evaluaciones concurrentes del
-                // mismo cliente llegan aquí con perfiles calculados desde la misma base, y sin
-                // esta condición la segunda pisaría los agregados de la primera. Compara sobre
-                // epoch millis, que ordena bien; el texto ISO no lo haría.
-                .conditionExpression("attribute_not_exists(#actualizadoEn) OR #actualizadoEn < :nuevo")
-                .expressionAttributeNames(Map.of("#actualizadoEn", PerfilDynamo.ACTUALIZADO_EN))
-                .expressionAttributeValues(
-                        Map.of(":nuevo", Atributos.momento(perfil.actualizadoEn())))
+                .conditionExpression("attribute_not_exists(#version) OR #version = :anterior")
+                .expressionAttributeNames(Map.of("#version", PerfilDynamo.VERSION))
+                .expressionAttributeValues(Map.of(":anterior", Atributos.numero(versionAnterior)))
                 .build();
 
         try {
             cliente.putItem(peticion).join();
         } catch (RuntimeException e) {
-            if (esConflictoDeVersion(e)) {
-                // No es un error: otra evaluación del mismo cliente escribió algo más reciente.
-                // Perder esta actualización es el resultado correcto.
-                log.debug("Perfil de {} ya actualizado por una evaluación más reciente", idEnmascarado(perfil));
-                return;
+            if (esChoqueDeCondicion(e)) {
+                log.debug(
+                        "Conflicto al guardar el perfil de {}: la fila ya no está en la versión {}",
+                        perfil.cliente().enmascarado(),
+                        versionAnterior);
+                throw ConflictoDeVersion.de("perfil", perfil.cliente().enmascarado(), versionAnterior);
             }
             throw e;
         }
     }
 
     /** El {@code join()} envuelve la causa en CompletionException, así que hay que desenvolverla. */
-    private static boolean esConflictoDeVersion(RuntimeException e) {
+    private static boolean esChoqueDeCondicion(RuntimeException e) {
         for (Throwable causa = e; causa != null; causa = causa.getCause()) {
             if (causa instanceof ConditionalCheckFailedException) {
                 return true;
             }
         }
         return false;
-    }
-
-    private static String idEnmascarado(PerfilDeComportamiento perfil) {
-        return perfil.cliente().enmascarado();
     }
 }

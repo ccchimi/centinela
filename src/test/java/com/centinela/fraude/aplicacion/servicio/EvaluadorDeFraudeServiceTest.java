@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import com.centinela.fraude.dominio.ObjetosDePrueba;
 import com.centinela.fraude.dominio.PerfilDePrueba;
+import com.centinela.fraude.dominio.excepcion.ConflictoDeVersion;
 import com.centinela.fraude.dominio.modelo.Decision;
 import com.centinela.fraude.dominio.modelo.EvaluacionDeFraude;
 import com.centinela.fraude.dominio.modelo.PerfilDeComportamiento;
@@ -17,9 +18,8 @@ import com.centinela.fraude.dominio.modelo.Transaccion;
 import com.centinela.fraude.dominio.modelo.vo.ClaveDeVelocidad;
 import com.centinela.fraude.dominio.modelo.vo.DimensionDeVelocidad;
 import com.centinela.fraude.dominio.modelo.vo.IdCliente;
+import com.centinela.fraude.dominio.puerto.salida.ActaDeDecisiones;
 import com.centinela.fraude.dominio.puerto.salida.ContadorDeVelocidad;
-import com.centinela.fraude.dominio.puerto.salida.PublicadorDeDecisiones;
-import com.centinela.fraude.dominio.puerto.salida.RegistroDeAuditoria;
 import com.centinela.fraude.dominio.puerto.salida.RepositorioDePerfiles;
 import com.centinela.fraude.dominio.regla.ContextoDeEvaluacion;
 import com.centinela.fraude.dominio.regla.MotorDeReglas;
@@ -40,6 +40,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -49,9 +50,9 @@ import org.mockito.quality.Strictness;
  * Pruebas del caso de uso. Solo JUnit y Mockito: sin contexto de Spring, sin contenedores.
  *
  * <p>Lo que estos tests fijan no es el cálculo del riesgo —de eso se ocupan los tests de las
- * reglas— sino el <strong>comportamiento bajo fallo</strong>: qué pasa cuando el perfil no
- * llega, cuando la caché no responde, cuando la auditoría se cae. Es la parte del sistema que
- * decide si una caída de una dependencia degrada la cobertura o tumba las autorizaciones.
+ * reglas— sino el <strong>comportamiento bajo fallo</strong> y el <strong>ciclo de
+ * aprendizaje</strong>: qué pasa cuando el perfil no llega, cuando la caché no responde, y bajo
+ * qué condiciones el motor puede escribir de vuelta lo que ha aprendido.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -70,10 +71,7 @@ class EvaluadorDeFraudeServiceTest {
     private ContadorDeVelocidad contadores;
 
     @Mock
-    private RegistroDeAuditoria auditoria;
-
-    @Mock
-    private PublicadorDeDecisiones publicador;
+    private ActaDeDecisiones acta;
 
     private EvaluadorDeFraudeService servicio;
 
@@ -93,8 +91,7 @@ class EvaluadorDeFraudeServiceTest {
     }
 
     private EvaluadorDeFraudeService construir(MotorDeReglas motor, ConfiguracionDelEvaluador configuracion) {
-        servicio = new EvaluadorDeFraudeService(
-                motor, perfiles, contadores, auditoria, publicador, configuracion, RELOJ);
+        servicio = new EvaluadorDeFraudeService(motor, perfiles, contadores, acta, configuracion, RELOJ);
         return servicio;
     }
 
@@ -169,15 +166,16 @@ class EvaluadorDeFraudeServiceTest {
         }
 
         @Test
-        @DisplayName("audita y publica la decisión exactamente una vez")
-        void auditaYPublica() {
+        @DisplayName("asienta la decisión una sola vez y no toca Kafka")
+        void asientaLaDecision() {
             when(perfiles.buscarPor(any())).thenReturn(Optional.of(PerfilDePrueba.unPerfil().construir()));
 
             EvaluacionDeFraude evaluacion =
                     construir(new MotorDeReglas(List.of(reglaQueAporta(10)))).evaluar(ObjetosDePrueba.transaccionWeb());
 
-            verify(auditoria).registrar(evaluacion);
-            verify(publicador).publicar(evaluacion);
+            // El puerto de publicación ya ni siquiera es dependencia de este servicio: la
+            // decisión se asienta con su obligación de publicarse y el relevo la cumple aparte.
+            verify(acta).asentar(evaluacion);
         }
 
         @Test
@@ -202,6 +200,102 @@ class EvaluadorDeFraudeServiceTest {
             construir(new MotorDeReglas(List.of(reglaQueAporta(10)))).evaluar(ObjetosDePrueba.transaccionWeb());
 
             verify(contadores, never()).incrementarYContar(any(), any());
+        }
+    }
+
+    @Nested
+    @DisplayName("realimentación del perfil")
+    class RealimentacionDelPerfil {
+
+        @Test
+        @DisplayName("una aprobación incorpora la transacción y sube la versión")
+        void aprendeDeUnaAprobacion() {
+            PerfilDeComportamiento base =
+                    PerfilDePrueba.unPerfil().conMedia("100.00").enVersion(7).construir();
+            when(perfiles.buscarPor(any())).thenReturn(Optional.of(base));
+
+            construir(new MotorDeReglas(List.of(reglaQueAporta(10)))).evaluar(ObjetosDePrueba.transaccionWeb());
+
+            ArgumentCaptor<PerfilDeComportamiento> guardado = ArgumentCaptor.forClass(PerfilDeComportamiento.class);
+            verify(perfiles).guardar(guardado.capture());
+
+            assertThat(guardado.getValue().version()).isEqualTo(8);
+            assertThat(guardado.getValue().transaccionesObservadas())
+                    .isEqualTo(base.transaccionesObservadas() + 1);
+            assertThat(guardado.getValue().ultimaActividad()).contains(ObjetosDePrueba.AHORA);
+        }
+
+        @Test
+        @DisplayName("una decisión con fricción NO enseña nada al perfil")
+        void noAprendeDeLoQueSospecho() {
+            // Es la guarda que impide que un atacante entrene el perfil a su favor: si una
+            // compra rechazada desde Tokio hiciera habitual a Japón, la siguiente ya no
+            // dispararía la regla de país inusual.
+            when(perfiles.buscarPor(any())).thenReturn(Optional.of(PerfilDePrueba.unPerfil().construir()));
+
+            construir(new MotorDeReglas(List.of(reglaQueAporta(900)))).evaluar(ObjetosDePrueba.transaccionWeb());
+
+            verify(perfiles, never()).guardar(any());
+        }
+
+        @Test
+        @DisplayName("no escribe si la lectura del perfil no fue concluyente")
+        void noEscribeSobreUnaLecturaFallida() {
+            // El fallo más caro posible: con el perfil provisional en mano, escribir de vuelta
+            // sustituiría el historial real de un cliente de años por uno en blanco.
+            when(perfiles.buscarPor(any())).thenThrow(new IllegalStateException("DynamoDB no responde"));
+
+            EvaluacionDeFraude evaluacion =
+                    construir(new MotorDeReglas(List.of(reglaQueAporta(10)))).evaluar(ObjetosDePrueba.transaccionWeb());
+
+            assertThat(evaluacion.estaDegradada()).isTrue();
+            verify(perfiles, never()).guardar(any());
+        }
+
+        @Test
+        @DisplayName("un cliente nuevo sí genera perfil: la ausencia es una lectura concluyente")
+        void aprendeDeUnClienteNuevo() {
+            when(perfiles.buscarPor(any())).thenReturn(Optional.empty());
+
+            construir(new MotorDeReglas(List.of(reglaQueAporta(10)))).evaluar(ObjetosDePrueba.transaccionWeb());
+
+            ArgumentCaptor<PerfilDeComportamiento> guardado = ArgumentCaptor.forClass(PerfilDeComportamiento.class);
+            verify(perfiles).guardar(guardado.capture());
+            assertThat(guardado.getValue().transaccionesObservadas()).isEqualTo(1);
+            assertThat(guardado.getValue().version()).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("ante un conflicto de versión relee y reintenta una vez")
+        void reintentaTrasUnConflicto() {
+            PerfilDeComportamiento base = PerfilDePrueba.unPerfil().enVersion(7).construir();
+            PerfilDeComportamiento masReciente = PerfilDePrueba.unPerfil().enVersion(9).construir();
+            when(perfiles.buscarPor(any())).thenReturn(Optional.of(base)).thenReturn(Optional.of(masReciente));
+            doThrow(ConflictoDeVersion.de("perfil", "x", 7))
+                    .doNothing()
+                    .when(perfiles)
+                    .guardar(any());
+
+            construir(new MotorDeReglas(List.of(reglaQueAporta(10)))).evaluar(ObjetosDePrueba.transaccionWeb());
+
+            ArgumentCaptor<PerfilDeComportamiento> guardado = ArgumentCaptor.forClass(PerfilDeComportamiento.class);
+            verify(perfiles, org.mockito.Mockito.times(2)).guardar(guardado.capture());
+            // El reintento parte de la versión que ganó la carrera, no de la que ya está obsoleta.
+            assertThat(guardado.getAllValues().getFirst().version()).isEqualTo(8);
+            assertThat(guardado.getAllValues().getLast().version()).isEqualTo(10);
+        }
+
+        @Test
+        @DisplayName("un fallo al guardar el perfil no invalida la decisión")
+        void elFalloAlGuardarNoRompeNada() {
+            when(perfiles.buscarPor(any())).thenReturn(Optional.of(PerfilDePrueba.unPerfil().construir()));
+            doThrow(new IllegalStateException("tabla no disponible")).when(perfiles).guardar(any());
+
+            EvaluacionDeFraude evaluacion =
+                    construir(new MotorDeReglas(List.of(reglaQueAporta(10)))).evaluar(ObjetosDePrueba.transaccionWeb());
+
+            assertThat(evaluacion.decision()).isEqualTo(Decision.APROBAR);
+            verify(acta).asentar(evaluacion);
         }
     }
 
@@ -328,37 +422,17 @@ class EvaluadorDeFraudeServiceTest {
             assertThat(evaluacion.advertencias()).hasSize(2).allSatisfy(a -> assertThat(a).contains("RAFAGA"));
             assertThat(evaluacion.estaDegradada()).isTrue();
         }
-    }
-
-    @Nested
-    @DisplayName("difusión del resultado")
-    class DifusionDelResultado {
 
         @Test
-        @DisplayName("un fallo de auditoría no invalida una decisión ya tomada")
-        void falloDeAuditoria() {
+        @DisplayName("un fallo al asentar no invalida una decisión ya tomada")
+        void falloAlAsentar() {
             when(perfiles.buscarPor(any())).thenReturn(Optional.of(PerfilDePrueba.unPerfil().construir()));
-            doThrow(new IllegalStateException("tabla no disponible")).when(auditoria).registrar(any());
+            doThrow(new IllegalStateException("tabla no disponible")).when(acta).asentar(any());
 
             EvaluacionDeFraude evaluacion =
                     construir(new MotorDeReglas(List.of(reglaQueAporta(900)))).evaluar(ObjetosDePrueba.transaccionWeb());
 
             assertThat(evaluacion.decision()).isEqualTo(Decision.RECHAZAR);
-            // Y aun así se intenta publicar: los dos destinos son independientes.
-            verify(publicador).publicar(evaluacion);
-        }
-
-        @Test
-        @DisplayName("un fallo de publicación no invalida una decisión ya tomada")
-        void falloDePublicacion() {
-            when(perfiles.buscarPor(any())).thenReturn(Optional.of(PerfilDePrueba.unPerfil().construir()));
-            doThrow(new IllegalStateException("broker no disponible")).when(publicador).publicar(any());
-
-            EvaluacionDeFraude evaluacion =
-                    construir(new MotorDeReglas(List.of(reglaQueAporta(900)))).evaluar(ObjetosDePrueba.transaccionWeb());
-
-            assertThat(evaluacion.decision()).isEqualTo(Decision.RECHAZAR);
-            verify(auditoria).registrar(evaluacion);
         }
     }
 }

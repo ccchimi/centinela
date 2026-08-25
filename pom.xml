@@ -141,6 +141,15 @@
       <artifactId>spring-boot-starter-kafka-test</artifactId>
       <scope>test</scope>
     </dependency>
+    <!--
+      El slice @WebMvcTest tambien se separo en Boot 4: spring-boot-starter-test ya no lo trae.
+      Sin esto, la anotacion sencillamente no existe en el classpath.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-webmvc-test</artifactId>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers-junit-jupiter</artifactId>

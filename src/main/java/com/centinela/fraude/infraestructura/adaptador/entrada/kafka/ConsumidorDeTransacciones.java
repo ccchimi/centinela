@@ -1,6 +1,8 @@
 package com.centinela.fraude.infraestructura.adaptador.entrada.kafka;
 
 import com.centinela.fraude.dominio.modelo.EvaluacionDeFraude;
+import com.centinela.fraude.infraestructura.adaptador.entrada.contrato.TraductorDeTransacciones;
+import com.centinela.fraude.infraestructura.adaptador.entrada.contrato.TransaccionEvento;
 import com.centinela.fraude.dominio.modelo.Transaccion;
 import com.centinela.fraude.dominio.puerto.entrada.EvaluarTransaccionUseCase;
 import org.apache.kafka.clients.consumer.ConsumerRecord;

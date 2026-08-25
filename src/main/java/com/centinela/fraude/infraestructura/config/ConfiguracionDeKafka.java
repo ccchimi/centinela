@@ -1,7 +1,7 @@
 package com.centinela.fraude.infraestructura.config;
 
 import com.centinela.fraude.dominio.excepcion.ViolacionDeInvariante;
-import com.centinela.fraude.infraestructura.adaptador.entrada.kafka.EventoInvalidoException;
+import com.centinela.fraude.infraestructura.adaptador.entrada.contrato.EventoInvalidoException;
 import com.centinela.fraude.infraestructura.adaptador.salida.kafka.SerializadorDeDescartes;
 import java.util.HashMap;
 import java.util.Map;
