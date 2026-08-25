@@ -1,22 +1,51 @@
 ## ---------------------------------------------------------------------------------------------
-## Perfil 'local': todo contra LocalStack y un broker en la máquina del desarrollador.
+## Perfil 'local': todo contra los contenedores de docker-compose.yml.
 ##
-##   ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+##   docker compose up -d
+##   ./mvnw spring-boot:run              (el perfil 'local' es el activo por defecto)
 ##
-## Las credenciales son las que LocalStack acepta por convención; no son secretos.
+## Las credenciales son las que LocalStack acepta por convención; no son secretos y por eso
+## están aquí en claro. Es la única circunstancia en la que aparecerán en un fichero.
 ## ---------------------------------------------------------------------------------------------
 
 spring:
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      # En local interesa lo contrario que en producción: reprocesar lo que haya en el topic
+      # para poder reproducir un caso sin volver a publicarlo.
+      auto-offset-reset: earliest
+    producer:
+      properties:
+        # Sobre la JVM sí se puede usar zstd; la restricción es de la imagen nativa.
+        compression.type: zstd
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
 
 centinela:
   aws:
     region: eu-west-1
-    endpoint-override: http://localhost:4566
+    endpoint-override: ${AWS_ENDPOINT_OVERRIDE:http://localhost:4566}
+    cliente:
+      # Los 120 ms de producción están calculados para DynamoDB en la misma zona de
+      # disponibilidad. LocalStack a través de la red de Docker es uno o dos órdenes de magnitud
+      # más lento: con el valor real, cada evaluación sale degradada por ApiCallTimeoutException
+      # y el log se llena de errores que no son un problema del sistema, sino del entorno.
+      #
+      # Se relaja SOLO aquí. application.yml no se toca: el presupuesto de latencia es un
+      # requisito del producto, no una constante de conveniencia (ADR-0010).
+      timeout-api-call: 10s
+      timeout-intento: 5s
   motor:
     # Sin presión de producción, más margen para poder depurar paso a paso.
-    presupuesto-latencia: 5s
+    presupuesto-latencia: 10s
+    bandeja:
+      # Relevo rápido para no esperar medio segundo por cada decisión mientras se prueba.
+      intervalo-de-relevo: 200ms
+      retraso-inicial: 1s
 
 management:
   endpoints:

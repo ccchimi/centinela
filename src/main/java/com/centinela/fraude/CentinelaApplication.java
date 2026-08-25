@@ -2,7 +2,9 @@ package com.centinela.fraude;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import com.centinela.fraude.infraestructura.config.PistasDeImagenNativa;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+import org.springframework.context.annotation.ImportRuntimeHints;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -15,6 +17,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @SpringBootApplication
 @ConfigurationPropertiesScan
 @EnableScheduling
+@ImportRuntimeHints(PistasDeImagenNativa.class)
 public class CentinelaApplication {
 
     public static void main(String[] args) {

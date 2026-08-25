@@ -289,10 +289,36 @@
             <artifactId>native-maven-plugin</artifactId>
             <configuration>
               <imageName>${native.image.name}</imageName>
+
+              <!--
+                Repositorio de metadata de accesibilidad de GraalVM. Es lo que hace viable esta
+                compilacion: kafka-clients NO trae metadata propia (el SDK de AWS y Lettuce si),
+                y sin este repositorio habria que escribir a mano la configuracion de reflexion
+                del cliente de Kafka entero. Ver PistasDeImagenNativa para lo que si es nuestro.
+              -->
+              <metadataRepository>
+                <enabled>true</enabled>
+              </metadataRepository>
+
               <buildArgs>
-                <buildArg>--enable-http</buildArg>
                 <buildArg>--enable-https</buildArg>
                 <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+
+                <!--
+                  Sin esto, GraalVM compila para el micro donde corre el build (por defecto
+                  x86-64-v3 o superior) y el binario revienta con SIGILL en cualquier maquina
+                  mas antigua. Para una imagen que se publica en un registro y corre donde
+                  toque, la portabilidad vale mas que el ultimo 5% de rendimiento.
+                -->
+                <buildArg>-march=compatibility</buildArg>
+
+                <!--
+                  Volcados de heap sobre un proceso nativo: la unica forma de investigar un
+                  consumo raro cuando ya no hay JVM debajo. Se deja fuera 'jfr' a proposito,
+                  porque embebe el registro completo de tipos de evento y engorda el binario
+                  bastante mas de lo que aporta en un servicio que ya publica metricas.
+                -->
+                <buildArg>--enable-monitoring=heapdump</buildArg>
               </buildArgs>
             </configuration>
           </plugin>

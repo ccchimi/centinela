@@ -1,0 +1,86 @@
+## ---------------------------------------------------------------------------------------------
+## Perfil 'prod'.
+##
+## Regla del fichero: aquí NO hay valores por defecto para nada crítico. Toda variable sin
+## defecto que falte hace que la aplicación no arranque, y eso es intencionado: es infinitamente
+## preferible un contenedor que no levanta a uno que levanta apuntando al broker equivocado o
+## escribiendo en la tabla de otro entorno.
+##
+## Credenciales de AWS: NO se configuran. El SDK usa su cadena por defecto y en AWS eso resuelve
+## al rol de la tarea (IRSA en EKS, task role en ECS), que rota solo y no deja secretos de larga
+## duración en ninguna parte. Poner AWS_ACCESS_KEY_ID en el entorno de un despliegue real es un
+## hallazgo de auditoría, no una configuración.
+##
+## Lo demás que sí es secreto —contraseña de Redis, JAAS de MSK— entra por variable de entorno
+## desde Secrets Manager a través del task definition, nunca por imagen ni por fichero.
+## ---------------------------------------------------------------------------------------------
+
+spring:
+  kafka:
+    # Sin defecto: si falta, no arranca.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
+    properties:
+      security.protocol: ${KAFKA_SECURITY_PROTOCOL:SASL_SSL}
+      sasl.mechanism: ${KAFKA_SASL_MECHANISM:AWS_MSK_IAM}
+      # Autenticación IAM de MSK: el mismo rol de la tarea que usa DynamoDB. El módulo de login
+      # y el callback handler los aporta aws-msk-iam-auth, que se añade al desplegar contra MSK.
+      sasl.jaas.config: ${KAFKA_SASL_JAAS_CONFIG:software.amazon.msk.auth.iam.IAMLoginModule required;}
+      sasl.client.callback.handler.class: ${KAFKA_SASL_CALLBACK:software.amazon.msk.auth.iam.IAMClientCallbackHandler}
+
+    consumer:
+      group-id: ${KAFKA_GROUP_ID}
+      auto-offset-reset: latest
+
+    listener:
+      # Debe coincidir con las particiones del topic; por encima, los consumidores sobran.
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}
+
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      ssl:
+        # ElastiCache con cifrado en tránsito. Desactivarlo expone los contadores de velocidad
+        # y, con ellos, el patrón de gasto de los clientes.
+        enabled: true
+
+centinela:
+  aws:
+    region: ${AWS_REGION}
+    # Vacío en producción: el SDK resuelve el endpoint por región. Que esta variable llegue con
+    # valor en prod significaría que alguien está apuntando a un endpoint alternativo.
+    endpoint-override: ""
+    dynamodb:
+      tabla-perfiles: ${TABLA_PERFILES}
+      tabla-auditoria: ${TABLA_AUDITORIA}
+      tabla-bandeja: ${TABLA_BANDEJA}
+
+  motor:
+    politica:
+      # Versionada explícitamente: es lo que queda grabado en cada decisión publicada y lo
+      # primero que se pregunta al revisar una decisión de hace meses.
+      version: ${POLITICA_VERSION}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Sólo lo necesario para sondas y métricas. 'env', 'configprops' o 'heapdump' expuestos
+        # en un motor de fraude son una filtración de configuración y de datos.
+        include: health,info,prometheus
+  endpoint:
+    health:
+      # Nunca 'always' en producción: el detalle de salud enumera hosts y estados de las
+      # dependencias, que es reconocimiento gratis para quien sondee el endpoint.
+      show-details: never
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:0.05}
+
+logging:
+  level:
+    root: INFO
+    com.centinela.fraude: ${LOG_LEVEL_CENTINELA:INFO}
+    org.apache.kafka: WARN
+    software.amazon.awssdk: WARN

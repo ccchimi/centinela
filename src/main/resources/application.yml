@@ -1,16 +1,28 @@
 ## ---------------------------------------------------------------------------------------------
 ## Centinela - configuración base
 ##
-## Todo valor con impacto en producción se resuelve por variable de entorno con un valor por
-## defecto apto para desarrollo local. Ningún secreto vive en este fichero: en AWS los inyecta
-## Secrets Manager a través del task definition.
+## 12-Factor: la configuración vive en el entorno. Aquí sólo hay estructura y valores por
+## defecto aptos para desarrollo; todo lo que cambia entre despliegues se resuelve por variable
+## de entorno.
 ##
-## Perfiles: 'local' (LocalStack + broker local, ver application-local.yml) y 'aws'.
+## NINGÚN SECRETO EN ESTE FICHERO. Contraseñas y credenciales entran siempre por variable de
+## entorno, y en AWS las inyecta Secrets Manager a través del task definition.
+##
+## Sobre las credenciales de AWS: el SDK usa su cadena por defecto, que ya lee
+## AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN del entorno sin que haya que
+## configurar nada. En producción NO se usan: allí el proveedor correcto es el rol de la tarea
+## (IRSA en EKS, task role en ECS), que rota las credenciales solo y no deja secretos de larga
+## duración en ninguna parte. Ver application-prod.yml.
+##
+## Perfiles: 'local' (docker compose) y 'prod'.
 ## ---------------------------------------------------------------------------------------------
 
 spring:
   application:
     name: centinela
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
 
   main:
     banner-mode: "off"
@@ -44,8 +56,6 @@ spring:
 
     properties:
       security.protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
-      # En MSK con autenticación IAM, el perfil 'aws' añade aquí sasl.mechanism=AWS_MSK_IAM
-      # y el callback handler del SDK.
       metadata.max.age.ms: 180000
 
     consumer:
@@ -53,7 +63,7 @@ spring:
       # 'latest' y no 'earliest': si el motor estuvo caído, reevaluar autorizaciones de hace
       # horas no aporta nada (ya se resolvieron) y sí crea una avalancha de decisiones tardías.
       # La reevaluación histórica es un proceso aparte y deliberado.
-      auto-offset-reset: latest
+      auto-offset-reset: ${KAFKA_AUTO_OFFSET_RESET:latest}
       enable-auto-commit: false
       isolation-level: read_committed
       max-poll-records: 50
@@ -84,20 +94,27 @@ spring:
       properties:
         enable.idempotence: true
         max.in.flight.requests.per.connection: 5
-        compression.type: zstd
+        # ------------------------------------------------------------------------------------
+        # gzip y no zstd. zstd, lz4 y snappy son bibliotecas JNI: cargan un .so desde el propio
+        # jar en tiempo de ejecución, y en una imagen nativa ese recurso no está incluido salvo
+        # que se añada a mano (kafka-clients no trae metadata de native-image). gzip usa
+        # java.util.zip, que es del JDK y funciona igual compilado.
+        #
+        # El coste es un ratio de compresión peor sobre mensajes que son JSON pequeño. Si se
+        # ejecuta sobre la JVM, KAFKA_COMPRESSION=zstd lo cambia sin tocar código.
+        # ------------------------------------------------------------------------------------
+        compression.type: ${KAFKA_COMPRESSION:gzip}
         # 5 ms de espera agrupan lotes sin comprometer el presupuesto de latencia.
         linger.ms: 5
         # Kafka EXIGE delivery.timeout.ms >= linger.ms + request.timeout.ms, y si no se cumple
         # el productor no se llega a construir: falla el primer envío, no el arranque. El valor
         # por defecto de request.timeout.ms son 30 s, así que hay que bajarlo explícitamente.
-        # Además interesa por sí mismo: 30 s esperando a un broker caído es una eternidad para
-        # una decisión que ya se tomó.
         request.timeout.ms: 10000
         delivery.timeout.ms: 30000
         spring.json.add.type.headers: false
 
     listener:
-      # Confirmación explícita tras evaluar y publicar: si el proceso cae a mitad, el mensaje
+      # Confirmación explícita tras evaluar y asentar: si el proceso cae a mitad, el mensaje
       # se reprocesa. Al-menos-una-vez con decisiones idempotentes por id de transacción.
       ack-mode: manual_immediate
       # Nunca por encima del número de particiones del topic: los consumidores sobrantes
@@ -112,17 +129,19 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      # Vacía en local; en AWS la inyecta Secrets Manager.
+      password: ${REDIS_PASSWORD:}
       ssl:
         enabled: ${REDIS_SSL_ENABLED:false}
       # Timeout agresivo a propósito: este acceso está dentro de la ventana de autorización.
       # Si la caché no responde en 80 ms, el motor degrada la señal de velocidad y sigue.
-      timeout: 80ms
+      timeout: ${REDIS_TIMEOUT:80ms}
       connect-timeout: 250ms
       client-type: lettuce
       lettuce:
         pool:
           enabled: true
-          max-active: 32
+          max-active: ${REDIS_POOL_MAX:32}
           max-idle: 16
           min-idle: 4
           max-wait: 50ms
@@ -143,14 +162,14 @@ centinela:
       # años: mezclarlas ataría el coste del relevo al histórico completo.
       tabla-bandeja: ${TABLA_BANDEJA:centinela-bandeja-salida}
       # Retención del rastro de auditoría, en días (7 años).
-      retencion-auditoria-dias: 2555
+      retencion-auditoria-dias: ${RETENCION_AUDITORIA_DIAS:2555}
     cliente:
       # Ambos por debajo del presupuesto de latencia del motor: si el SDK tardara más, el
       # presupuesto lo cortaría y toda evaluación saldría degradada por diseño.
-      timeout-api-call: 120ms
-      timeout-intento: 60ms
+      timeout-api-call: ${AWS_TIMEOUT_API_CALL:120ms}
+      timeout-intento: ${AWS_TIMEOUT_INTENTO:60ms}
       max-reintentos: 2
-      max-conexiones: 64
+      max-conexiones: ${AWS_MAX_CONEXIONES:64}
 
   kafka:
     topics:
@@ -168,26 +187,27 @@ centinela:
       espera-inicial: 200ms
       multiplicador: 2.0
       espera-maxima: 2s
-      # Espera del acuse del broker al publicar una decisión.
+      # Espera del acuse del broker al publicar una decisión. Ya no está en el camino caliente:
+      # lo paga el relevo del outbox, no la ventana de autorización.
       timeout-de-publicacion: 5s
 
   motor:
     # Presupuesto total de recolección de contexto. Al agotarse, el motor decide con las
     # señales que ya tiene: llegar tarde a una autorización equivale a no responder.
-    presupuesto-latencia: 150ms
+    presupuesto-latencia: ${MOTOR_PRESUPUESTO_LATENCIA:150ms}
     # Moneda de referencia para perfiles de clientes sin historial.
-    moneda-por-defecto: EUR
+    moneda-por-defecto: ${MOTOR_MONEDA:EUR}
 
     # ------------------------------------------------------------------------------------------
-    # Relevo de la bandeja de salida (patrón outbox). Kafka ya no está en el camino caliente:
+    # Relevo de la bandeja de salida (patrón outbox). Kafka no está en el camino caliente:
     # la decisión se asienta con su obligación de publicarse y este relevo la cumple aparte.
     # ------------------------------------------------------------------------------------------
     bandeja:
-      tamano-de-lote: 50
+      tamano-de-lote: ${BANDEJA_LOTE:50}
       intentos-antes-de-alertar: 5
       # Compromiso entre latencia de publicación y presión sobre DynamoDB: cada ciclo es una
       # consulta al índice de pendientes, aunque no haya nada que hacer.
-      intervalo-de-relevo: 500ms
+      intervalo-de-relevo: ${BANDEJA_INTERVALO:500ms}
       retraso-inicial: 2s
 
     # ------------------------------------------------------------------------------------------
@@ -195,10 +215,10 @@ centinela:
     # semanas mirando la tasa de falsos positivos y no puede exigir un despliegue.
     # ------------------------------------------------------------------------------------------
     politica:
-      version: v1-inicial
-      ventana-velocidad: 60s
-      max-transacciones-por-cliente-en-ventana: 8
-      max-intentos-por-dispositivo-en-ventana: 6
+      version: ${POLITICA_VERSION:v1-inicial}
+      ventana-velocidad: ${POLITICA_VENTANA:60s}
+      max-transacciones-por-cliente-en-ventana: ${POLITICA_MAX_TX_CLIENTE:8}
+      max-intentos-por-dispositivo-en-ventana: ${POLITICA_MAX_INTENTOS_DISPOSITIVO:6}
       tolerancia-desfase-reloj: 5m
       factor-desviacion-moderada: 5
       factor-desviacion-alta: 10
@@ -239,7 +259,7 @@ server:
 
 logging:
   level:
-    root: INFO
+    root: ${LOG_LEVEL_ROOT:INFO}
     com.centinela.fraude: ${LOG_LEVEL_CENTINELA:INFO}
     org.apache.kafka: WARN
     software.amazon.awssdk: WARN

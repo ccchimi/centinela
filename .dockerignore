@@ -1,0 +1,25 @@
+# Todo lo que no forma parte de la construcción. Sin esto, el contexto de build incluiría
+# target/ entero (cientos de MB) y se enviaría al demonio de Docker en cada `docker build`.
+
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+.git/
+.gitignore
+.gitattributes
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+README.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+*.log
+*.build_artifacts.txt
+/centinela
+/centinela.exe

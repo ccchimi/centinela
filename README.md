@@ -4,9 +4,9 @@ Motor de detección de fraude transaccional en tiempo real. Consume autorizacion
 las evalúa dentro del presupuesto de latencia de la autorización y emite un veredicto con la
 evidencia que lo sostiene.
 
-**Estado:** iteración 4 — sin huecos abiertos. Ciclo de aprendizaje cerrado, outbox
-transaccional y API REST con Problem Details. 163 tests unitarios (sin contenedores, ~7 s) + 26
-de integración contra Kafka, LocalStack y Redis reales.
+**Estado:** iteración 5 — listo para producción. Imagen nativa con GraalVM sobre distroless,
+ecosistema completo en `docker compose`, configuración 12-Factor por perfiles. 163 tests
+unitarios (sin contenedores, ~7 s) + 26 de integración contra Kafka, LocalStack y Redis reales.
 
 ---
 
@@ -22,6 +22,8 @@ de integración contra Kafka, LocalStack y Redis reales.
 | MapStruct | 1.6.3 | GA; 1.7.0 sigue en beta |
 | ArchUnit | 1.5.0 | reglas del hexágono como test |
 | GraalVM Native Build Tools | 1.1.8 | gestionado por el parent de Spring Boot |
+| Imagen de compilación | `ghcr.io/graalvm/native-image-community:25` | no existe variante para JDK 26 |
+| Imagen final | `gcr.io/distroless/base-debian12` | glibc + OpenSSL + certificados, sin shell |
 
 Todas las versiones se comprobaron contra Maven Central el 2026-08-24 y son las últimas
 **GA**. Se descartaron deliberadamente `spring-boot-starter-parent:4.2.0-M1` y
@@ -47,22 +49,30 @@ GET  /api/v1/perfiles/{idCliente}      perfil de comportamiento (sólo lectura)
 Los errores salen como Problem Details (RFC 9457) con un `codigo` estable pensado para
 programar contra él, en lugar de parsear el texto.
 
-Los tests de integración necesitan un demonio Docker en marcha.
-
-Compilación nativa (requiere GraalVM):
-
-```bash
-./mvnw -Pnative native:compile
-```
-
-Ejecución con LocalStack y un broker local:
-
-```bash
-./mvnw spring-boot:run -Dspring-boot.run.profiles=local
-```
+Los tests de integración necesitan un demonio Docker en marcha. Para ejecutar la aplicación y
+construir la imagen nativa, ver [Levantar el ecosistema](#levantar-el-ecosistema) e
+[Imagen nativa](#imagen-nativa).
 
 > **JDK.** El build exige JDK 25 o superior (regla de `maven-enforcer-plugin`). Si `java -version`
 > devuelve otra cosa, apunta `JAVA_HOME` a tu instalación de 25.
+
+### Configuración: 12-Factor por perfiles
+
+| Fichero | Para qué |
+|---|---|
+| `application.yml` | estructura y valores por defecto aptos para desarrollo; **todo** lo que cambia entre despliegues sale por variable de entorno |
+| `application-local.yml` | `docker compose`: LocalStack, broker local, tiempos relajados y trazas al 100 % |
+| `application-prod.yml` | **sin valores por defecto para nada crítico**: si falta una variable, la aplicación no arranca |
+
+Que un contenedor no levante es infinitamente preferible a que levante apuntando al broker
+equivocado o escribiendo en la tabla de otro entorno.
+
+**Ningún secreto vive en un fichero.** Las contraseñas —Redis, JAAS de MSK— entran por variable
+de entorno desde Secrets Manager. Y las credenciales de AWS **no se configuran en producción**:
+el SDK usa su cadena por defecto, que en AWS resuelve al rol de la tarea (IRSA en EKS, task role
+en ECS) y rota solo. `AWS_ACCESS_KEY_ID` en el entorno de un despliegue real es un hallazgo de
+auditoría, no una configuración; en `docker compose` sí aparece, porque LocalStack exige
+credenciales y acepta cualquiera.
 
 ---
 
@@ -81,11 +91,11 @@ com.centinela.fraude
 │   ├── regla.catalogo           las 9 reglas de detección
 │   ├── puerto.entrada           EvaluarTransaccionUseCase
 │   ├── puerto.salida            RepositorioDePerfiles, ContadorDeVelocidad,
-│   │                            PublicadorDeDecisiones, RegistroDeAuditoria
+│   │                            ActaDeDecisiones, BandejaDeSalida, PublicadorDeDecisiones
 │   ├── excepcion                jerarquía sellada de errores de dominio
 │   └── compartido               guardas de invariantes
 ├── aplicacion                   ← Java plano + SLF4J, sin anotaciones de framework
-│   └── servicio                 EvaluadorDeFraudeService, ConfiguracionDelEvaluador
+│   └── servicio                 EvaluadorDeFraudeService, RelevoDeBandejaDeSalida
 └── infraestructura              ← la única capa que conoce Kafka, AWS y Spring
     ├── adaptador.entrada.contrato  TransaccionEvento y su traductor, compartidos por los dos
     │                               adaptadores de entrada
@@ -198,6 +208,120 @@ Un mensaje llega a la DLQ por dos caminos y el valor no es el mismo:
 `SerializadorDeDescartes` distingue los dos casos con un `switch` sobre patrones. Al triar la
 DLQ, el tipo real del error está en la cabecera `kafka_dlt-exception-cause-fqcn`; la de primer
 nivel es siempre el envoltorio de Spring Kafka.
+
+---
+
+## Levantar el ecosistema
+
+Toda la infraestructura (Kafka en KRaft, LocalStack con las tablas ya creadas, Redis):
+
+```bash
+docker compose up -d
+```
+
+La aplicación desde el IDE o con Maven contra esa infraestructura:
+
+```bash
+./mvnw spring-boot:run
+```
+
+Todo junto, con la aplicación compilada nativa dentro de compose:
+
+```bash
+docker compose --profile app up -d --build
+```
+
+Comprobar que responde y ver el arranque:
+
+```bash
+curl -s localhost:8080/actuator/health
+```
+
+```bash
+docker logs centinela-app | head -20
+```
+
+Enviar una transacción por la API:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/evaluaciones -H 'Content-Type: application/json' -d '{"idTransaccion":"tx-1","idCliente":"cli-1","importe":120.00,"moneda":"EUR","instrumento":{"tipo":"TARJETA","bin":"454213","ultimosCuatro":"1881","marca":"VISA","presente":false},"comercio":{"id":"com-100","nombre":"Libreria","mcc":"5942","pais":"ES"},"canal":"WEB","origen":{"latitud":40.4168,"longitud":-3.7038,"pais":"ES"},"idDispositivo":"disp-1","ocurridaEn":"2026-08-24T12:00:00Z"}'
+```
+
+Y bajarlo todo:
+
+```bash
+docker compose --profile app down -v
+```
+
+> Las tablas de DynamoDB las crea `infra/localstack/crear-tablas.sh`, que LocalStack ejecuta
+> solo al arrancar. Incluye el **índice disperso** del outbox: sin él el relevo no encuentra
+> nada pendiente y las decisiones no se publican nunca, sin ningún error visible.
+
+---
+
+## Imagen nativa
+
+```bash
+docker build -t centinela:nativo .
+```
+
+Medido en esta máquina, no estimado:
+
+| | |
+|---|---|
+| Compilación de GraalVM | 3 min 11 s |
+| Binario | 230 MB |
+| Imagen final | 338 MB |
+| **Arranque** | **0,24 s** |
+| RSS en reposo | 99 MiB |
+| `POST /api/v1/evaluaciones` extremo a extremo | 68 ms (incluye el arranque de `curl`) |
+
+El binario es grande para lo habitual en Spring Boot nativo (~100 MB): la aplicación arrastra
+Kafka, el SDK de AWS, Lettuce y Tomcat a la vez, y sólo `kafka-clients` aporta 14,6 MB de
+código. GraalVM imprime el desglose al terminar, en `Top 10 origins of code area`.
+
+Alternativa sobre JVM, para desarrollo, CI rápida o como plan B si una subida de librería rompe
+la compilación nativa:
+
+```bash
+docker build -t centinela:jvm --target jvm .
+```
+
+Compilar el binario nativo sin Docker (requiere GraalVM 25 en el `PATH`):
+
+```bash
+./mvnw -Pnative native:compile -DskipTests
+```
+
+### Qué hace falta registrar, y qué no
+
+El analizador de GraalVM recorre el código estáticamente: encuentra solo todo lo que se alcanza
+por llamada directa. Sólo hay que registrar lo que se resuelve por nombre en tiempo de ejecución.
+
+| Origen | Cómo se cubre |
+|---|---|
+| Spring (beans, controladores, `@ConfigurationProperties`) | procesamiento AOT del `spring-boot-maven-plugin` |
+| AWS SDK v2, Lettuce | metadata propia en `META-INF/native-image` |
+| `kafka-clients` | **no trae metadata**; la aporta el repositorio de accesibilidad de GraalVM, habilitado en el perfil `native` del POM |
+| DTO de cable (`TransaccionEvento`, `DecisionEvento`, respuestas REST) | [`PistasDeImagenNativa`](src/main/java/com/centinela/fraude/infraestructura/config/PistasDeImagenNativa.java) |
+| Records **anidados** de `@ConfigurationProperties` | idem — ver la nota de abajo |
+| **El motor de reglas** | **nada** — ver abajo |
+
+> **Los records anidados de `@ConfigurationProperties` sí hacen falta.** Spring AOT registra el
+> record externo para el enlace, pero Bean Validation lee los campos por reflexión al evaluar
+> `@NotBlank`, y los anidados se quedan fuera. El síntoma es un
+> `MissingReflectionRegistrationError` sobre un campo concreto —`PropiedadesDeAws$DynamoDb.tablaBandeja`
+> fue el primero— **en el arranque del binario, no en la compilación**. El build pasa limpio y
+> el contenedor muere al levantar: es el modo de fallo característico de la imagen nativa, y la
+> razón por la que no basta con que compile.
+
+**El motor de fraude no necesita una sola pista.** Las nueve reglas se instancian con `new` en
+`CatalogoDeReglas.estandar()`, el motor las recibe por constructor y el caso de uso se cablea con
+`@Bean` explícitos: no hay escaneo de componentes en el núcleo, ni `ServiceLoader`, ni proxies.
+Es la factura a cobrar de haber mantenido el dominio y la aplicación libres de anotaciones
+([ADR-0008](#adr-0008--la-capa-de-aplicación-tampoco-lleva-anotaciones)). Un diseño con
+`@Component` por regla habría necesitado registrar cada una, y cada regla nueva sería una pista
+que alguien acabaría olvidando.
 
 ---
 
@@ -379,6 +503,49 @@ Con un booleano `publicado` el índice contendría el histórico completo de dec
 del relevo crecería para siempre. Con el atributo ausente, el coste es proporcional a lo que
 queda por hacer.
 
+### ADR-0015 — La imagen nativa se compila sobre Java 25, no 26
+
+No es una preferencia: **no existe imagen de GraalVM community para JDK 26**. Los tags
+publicados de `ghcr.io/graalvm/native-image-community` llegan al 25, que además es la versión
+sobre la que Spring Boot 4.1 certifica la compilación nativa.
+
+Coincide con [ADR-0001](#adr-0001--java-25-lts-como-línea-base-no-java-26) por un motivo
+distinto y comprobable. Cuando salga la imagen para 26, migrar es cambiar el tag del Dockerfile
+y la propiedad `java.version` del POM; el código del dominio compila igual en ambas.
+
+### ADR-0016 — `gzip` en el productor de Kafka, no `zstd`
+
+zstd, lz4 y snappy son bibliotecas JNI: cargan un `.so` desde dentro del propio jar en tiempo de
+ejecución. En una imagen nativa ese recurso no se incluye salvo que se declare a mano, y
+`kafka-clients` **no trae metadata de native-image** que lo haga. El síntoma sería un
+`UnsatisfiedLinkError` en la primera publicación, ya en producción.
+
+`gzip` usa `java.util.zip`, que es del JDK y funciona igual compilado. El coste es un ratio de
+compresión peor sobre mensajes que son JSON pequeño — aceptable. Sobre la JVM, la variable
+`KAFKA_COMPRESSION=zstd` lo cambia sin tocar código, y el perfil `local` ya lo hace.
+
+### ADR-0017 — `-march=compatibility` en el binario nativo
+
+Por defecto GraalVM compila para el micro donde corre el build (`x86-64-v3` o superior). Una
+imagen se publica en un registro y se ejecuta donde toque; un binario optimizado para el
+portátil de quien compiló revienta con `SIGILL` en una instancia más antigua, y el fallo no se
+parece en nada a su causa.
+
+Para una imagen distribuible, la portabilidad vale más que el último margen de rendimiento.
+
+### ADR-0018 — Distroless con un `appuser` fabricado, no el `nonroot` de la imagen
+
+`gcr.io/distroless/base-debian12` trae glibc, OpenSSL y certificados raíz, y nada más: sin
+shell, sin gestor de paquetes, sin utilidades. Si alguien logra ejecución dentro del contenedor
+no encuentra con qué moverse.
+
+No se usa `base-nossl` porque la aplicación habla TLS con DynamoDB, MSK y ElastiCache; ni
+`static`, porque el binario enlaza glibc dinámicamente.
+
+El usuario se fabrica en una etapa intermedia y se copian `/etc/passwd` y `/etc/group`:
+distroless no trae `adduser` ni shell donde ejecutarlo. El UID es 10001 y no 0, que es lo que
+comprueba `runAsNonRoot` en Kubernetes sin resolver nombres.
+
 ### ADR-0006 — Validación en dos anillos
 
 `jakarta.validation` vive en los DTO de los adaptadores de entrada, donde protege la frontera y
@@ -413,9 +580,8 @@ dos capas con propósitos distintos, no una duplicada.
 
 ## Pendiente
 
-Los huecos que arrastraba el diseño están cerrados. Lo que queda es optimización y alcance:
-
-1. **GraalVM**: metadatos de reflexión y verificación del binario nativo (siguiente iteración).
+1. **Autenticación y autorización de la API REST.** Los endpoints de consulta exponen datos de
+   fraude y perfiles de comportamiento, y hoy están abiertos. Es lo primero antes de exponerla.
 2. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
    el umbral puede repartir la ráfaga a caballo de dos ventanas y colar hasta el doble.
 3. Arrendamiento por entrada en la bandeja de salida. Hoy dos relevos concurrentes pueden
@@ -426,8 +592,8 @@ Los huecos que arrastraba el diseño están cerrados. Lo que queda es optimizaci
 5. Métricas de negocio en Micrometer: tasa por decisión, reglas disparadas, evaluaciones
    degradadas, profundidad de la bandeja de salida, latencia por percentil.
 6. Realimentar el desenlace de un `DESAFIAR`, que hoy no vuelve al motor (ver ADR-0013).
-7. Autenticación y autorización de la API REST. Los endpoints de consulta exponen datos de
-   fraude y hoy están abiertos.
+7. Terraform con la infraestructura real. `infra/localstack/crear-tablas.sh` define las tablas y
+   el índice; hay que llevarlo a IaC para que los dos no se desvíen.
 
 ---
 
@@ -441,3 +607,22 @@ Los huecos que arrastraba el diseño están cerrados. Lo que queda es optimizaci
 - Los contenedores se declaran como `@Bean` en `ContenedoresDeIntegracion` y todas las clases de
   integración comparten la misma configuración de contexto a propósito: así el caché de
   contextos de Spring Test los reutiliza y arrancan una sola vez para toda la suite.
+- **La compilación nativa tarda minutos y pide varios GB de RAM.** Si falla con un error de
+  memoria, hay que subir el límite del demonio de Docker. Los tests no se ejecutan dentro del
+  build de la imagen (`-DskipTests`): ya corrieron en CI contra contenedores reales, y levantar
+  Kafka y LocalStack dentro de un `docker build` sería lento e innecesario.
+- Los avisos `sun.misc.Unsafe::objectFieldOffset will be removed` y
+  `RecomputeFieldValue.ArrayIndexScale ... failed` durante la compilación nativa vienen de Netty
+  y del SDK de AWS. Son conocidos y no impiden que el binario funcione.
+- La imagen nativa **no tiene shell**, así que `docker exec ... sh` no funciona y el
+  `healthcheck` de compose está desactivado a propósito. Para sondearla se llama a
+  `/actuator/health` desde fuera. Meter `curl` en la imagen para tener un healthcheck sería
+  cambiar seguridad por comodidad.
+- **`distroless/base-debian12` no incluye `libz`**, y el binario nativo la enlaza dinámicamente.
+  Sin copiarla, el contenedor muere al arrancar con `error while loading shared libraries:
+  libz.so.1` y ningún log de la aplicación, porque nunca llega a ejecutarse. Se copia desde una
+  etapa `debian:12-slim` —la misma distro que la base final— y no desde la imagen de GraalVM,
+  que es Oracle Linux. Para comprobar si hace falta alguna más: `ldd` sobre el ejecutable.
+- `apache/kafka-native` **no trae los scripts de `/opt/kafka/bin`**. La sonda habitual con
+  `kafka-topics.sh` falla con `not found` y deja el servicio en `unhealthy` indefinidamente con
+  el broker funcionando detrás; el `healthcheck` de compose usa `nc -z` por eso.
