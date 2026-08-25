@@ -42,3 +42,12 @@ Thumbs.db
 *.log
 .env
 .env.local
+
+### Terraform ###
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.tfplan
+terraform/.esquema.json

@@ -95,7 +95,8 @@ public class PistasDeImagenNativa implements RuntimeHintsRegistrar {
             PropiedadesDelMotor.Bandeja.class,
             PropiedadesDeKafka.class,
             PropiedadesDeKafka.Topics.class,
-            PropiedadesDeKafka.Reintentos.class);
+            PropiedadesDeKafka.Reintentos.class,
+            PropiedadesDeSeguridad.class);
 
     /** Nombres de clase que sólo aparecen como cadenas en {@code application.yml}. */
     private static final List<String> SERIALIZADORES_POR_NOMBRE = List.of(

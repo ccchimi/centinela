@@ -4,7 +4,7 @@ Motor de detección de fraude transaccional en tiempo real. Consume autorizacion
 las evalúa dentro del presupuesto de latencia de la autorización y emite un veredicto con la
 evidencia que lo sostiene.
 
-**Estado:** iteración 5 — listo para producción. Imagen nativa con GraalVM sobre distroless,
+**Estado:** iteración 6 — API autenticada, infraestructura como código y pipeline de despliegue. Imagen nativa con GraalVM sobre distroless,
 ecosistema completo en `docker compose`, configuración 12-Factor por perfiles. 163 tests
 unitarios (sin contenedores, ~7 s) + 26 de integración contra Kafka, LocalStack y Redis reales.
 
@@ -44,6 +44,13 @@ API REST (además del consumo por Kafka):
 POST /api/v1/evaluaciones              evalúa una transacción y devuelve el veredicto
 GET  /api/v1/evaluaciones/{idTx}       rastro de auditoría de una decisión
 GET  /api/v1/perfiles/{idCliente}      perfil de comportamiento (sólo lectura)
+```
+
+Todas las rutas exigen la cabecera `X-API-KEY`, **salvo `/actuator/health`**, que queda abierta
+porque el balanceador la consulta sin credenciales.
+
+```bash
+curl -H "X-API-KEY: $API_KEY" localhost:8080/api/v1/perfiles/cli-1
 ```
 
 Los errores salen como Problem Details (RFC 9457) con un `codigo` estable pensado para
@@ -325,6 +332,86 @@ que alguien acabaría olvidando.
 
 ---
 
+## Despliegue en AWS
+
+```
+terraform/
+├── main.tf, variables.tf, outputs.tf, versions.tf
+└── modules/
+    ├── red/          VPC, 3 zonas, NAT por zona, endpoints, grupos de seguridad
+    ├── ecr/          registro con etiquetas inmutables y purga automática
+    ├── datos/        3 tablas DynamoDB + ElastiCache Serverless
+    ├── mensajeria/   MSK Serverless con autenticación IAM
+    └── servicio/     ECS Fargate, ALB, IAM, logs, autoescalado
+```
+
+```bash
+cd terraform && terraform init && terraform plan -out=plan.tfplan
+```
+
+Validado con `terraform validate` y `terraform fmt` contra el provider AWS 6.x.
+
+### Antes del primer `apply`
+
+1. **Certificado de ACM** en la misma región (`var.arn_certificado`, sin valor por defecto: el
+   `plan` falla si falta). Sin TLS, la clave de la cabecera viajaría en claro.
+2. **Acotar `cidrs_permitidos`** a los rangos del autorizador y de la red corporativa. La clave
+   de API es la segunda barrera, no la primera.
+3. **Poner el valor del secreto.** Terraform crea el *contenedor* del secreto, no su valor: si
+   lo generara, acabaría en el estado de Terraform en claro.
+
+```bash
+aws secretsmanager put-secret-value --secret-id centinela-prod-api-key --secret-string "$(openssl rand -base64 32)" --region sa-east-1
+```
+
+### Por qué MSK Serverless
+
+Sólo admite **autenticación IAM**, que es justo lo que ya configura `application-prod.yml`: el
+mismo rol de la tarea que da acceso a DynamoDB da acceso a Kafka. Ni un secreto que rotar, ni un
+JAAS con contraseña, ni un almacén de certificados en la imagen. Con un clúster aprovisionado y
+SASL/SCRAM habría una contraseña más que custodiar.
+
+Y el tráfico de autorizaciones es irregular por hora del día: un clúster aprovisionado se
+dimensiona para el pico y se paga plano.
+
+**El coste de la decisión, para que quede escrito:** por encima de un caudal sostenido y
+predecible, tres brokers `m7g` salen más baratos. El día que el tráfico deje de tener valles hay
+que rehacer el número. Serverless tampoco admite Kafka Connect ni replicación entre regiones.
+
+### Lo que no está en el estado de Terraform
+
+Los **topics de Kafka** los crea la aplicación: `ConfiguracionDeKafka` declara tres `NewTopic` y
+`KafkaAdmin` los materializa al arrancar. Terraform no puede crearlos sin un proveedor que hable
+el protocolo desde dentro de la VPC. Consecuencia: **el número de particiones lo fija la primera
+tarea que arranca**, y ampliarlo después es una operación de Kafka, no un `terraform apply`.
+
+---
+
+## Pipeline
+
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) — tests → imagen nativa → ECR → ECS.
+
+**Sin claves de acceso.** La autenticación es por OIDC: GitHub emite un token firmado, AWS lo
+valida y devuelve credenciales temporales. Sólo hace falta un secreto de repositorio,
+`ROL_DESPLIEGUE_AWS`, que es un ARN, no un secreto. Una clave estática en los secretos de un
+repo sobrevive a quien la creó, no se rota nunca y basta un workflow malicioso en una rama para
+exfiltrarla.
+
+El rol de AWS debe confiar en `token.actions.githubusercontent.com` **acotando la condición
+`sub`** a este repositorio y a la rama `main`. Sin esa condición, cualquier repositorio de GitHub
+podría asumirlo.
+
+Otras tres decisiones del pipeline:
+
+- **Los tests corren siempre y antes de construir.** Los de integración levantan Kafka,
+  LocalStack y Redis con Testcontainers, que funciona en los runners de GitHub.
+- **La etiqueta es el SHA del commit, nunca `latest`.** Con etiquetas inmutables en ECR, cada
+  despliegue es reproducible: se puede saber qué binario tomó una decisión de hace tres meses.
+- **El despliegue registra una revisión nueva** de la definición de tarea partiendo de la que
+  dejó Terraform. `update-service --force-new-deployment` relanzaría la *misma* imagen.
+
+---
+
 ## Decisiones de arquitectura
 
 ### ADR-0001 — Java 25 LTS como línea base, no Java 26
@@ -546,6 +633,25 @@ El usuario se fabrica en una etapa intermedia y se copian `/etc/passwd` y `/etc/
 distroless no trae `adduser` ni shell donde ejecutarlo. El UID es 10001 y no 0, que es lo que
 comprueba `runAsNonRoot` en Kubernetes sin resolver nombres.
 
+### ADR-0019 — Clave de API compartida, no un servidor de identidades
+
+Los consumidores de esta API son sistemas internos —el autorizador y la herramienta de
+analistas—, no personas. Montar OAuth2 para dos clientes de confianza sería complejidad sin
+destinatario. Cuando aparezcan clientes externos, el reemplazo es
+`spring-boot-starter-oauth2-resource-server` y el filtro se retira entero.
+
+Tres detalles que no son opcionales:
+
+- **Comparación en tiempo constante.** `String.equals` corta en el primer carácter distinto, y
+  ese tiempo diferencial permite reconstruir la clave a base de peticiones.
+  `MessageDigest.isEqual` recorre siempre todos los bytes.
+- **La sonda de salud queda exenta.** Si el filtro la protegiera, el health check daría 401, ECS
+  marcaría la tarea como no sana y la reciclaría en bucle. El servicio nunca llegaría a estar
+  disponible y el motivo no se parecería a "falta una cabecera".
+- **En producción la propiedad no tiene valor por defecto.** Si falta `API_KEY`, la aplicación
+  no arranca. Una clave vacía que el filtro interpretara como "sin autenticación" convertiría un
+  despliegue mal configurado en una API de fraude abierta a Internet.
+
 ### ADR-0006 — Validación en dos anillos
 
 `jakarta.validation` vive en los DTO de los adaptadores de entrada, donde protege la frontera y
@@ -580,20 +686,21 @@ dos capas con propósitos distintos, no una duplicada.
 
 ## Pendiente
 
-1. **Autenticación y autorización de la API REST.** Los endpoints de consulta exponen datos de
-   fraude y perfiles de comportamiento, y hoy están abiertos. Es lo primero antes de exponerla.
-2. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
+1. **Rol de OIDC en Terraform.** El pipeline asume `ROL_DESPLIEGUE_AWS`, pero ese rol y su
+   política de confianza todavía se crean a mano. Es lo siguiente que debería entrar en IaC.
+2. **Rotación de la clave de API.** Hoy es un valor en Secrets Manager que se cambia a mano y
+   exige un redespliegue. Aceptar dos claves válidas a la vez permitiría rotarla sin ventana.
+3. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
    el umbral puede repartir la ráfaga a caballo de dos ventanas y colar hasta el doble.
-3. Arrendamiento por entrada en la bandeja de salida. Hoy dos relevos concurrentes pueden
-   publicar la misma decisión; se acepta porque la entrega ya es al-menos-una-vez y los
-   consumidores deduplican por identificador de transacción.
-4. Umbrales de `NivelDeRiesgo` movidos a `PoliticaDeRiesgo` (los pesos de las reglas ya están en
-   configuración; las bandas siguen siendo constantes del enum).
-5. Métricas de negocio en Micrometer: tasa por decisión, reglas disparadas, evaluaciones
+4. Arrendamiento por entrada en la bandeja de salida. Hoy dos relevos concurrentes pueden
+   publicar la misma decisión; se acepta porque la entrega ya es al-menos-una-vez.
+5. Umbrales de `NivelDeRiesgo` movidos a `PoliticaDeRiesgo` (los pesos ya están en configuración;
+   las bandas siguen siendo constantes del enum).
+6. Métricas de negocio en Micrometer: tasa por decisión, reglas disparadas, evaluaciones
    degradadas, profundidad de la bandeja de salida, latencia por percentil.
-6. Realimentar el desenlace de un `DESAFIAR`, que hoy no vuelve al motor (ver ADR-0013).
-7. Terraform con la infraestructura real. `infra/localstack/crear-tablas.sh` define las tablas y
-   el índice; hay que llevarlo a IaC para que los dos no se desvíen.
+7. Realimentar el desenlace de un `DESAFIAR`, que hoy no vuelve al motor (ver ADR-0013).
+8. Compilar para `arm64` y pasar las tareas a Graviton: en torno a un 20 % más barato. Es un
+   cambio del pipeline, no del Terraform.
 
 ---
 

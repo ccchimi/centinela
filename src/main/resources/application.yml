@@ -191,6 +191,21 @@ centinela:
       # lo paga el relevo del outbox, no la ventana de autorización.
       timeout-de-publicacion: 5s
 
+  # ------------------------------------------------------------------------------------------
+  # Seguridad de la API REST. Clave compartida en la cabecera X-API-KEY.
+  #
+  # El valor por defecto es de DESARROLLO y está en el repositorio: sirve para levantar el
+  # entorno local sin fricción. En application-prod.yml esta propiedad NO tiene defecto, así
+  # que un despliegue sin API_KEY no arranca en vez de quedarse abierto.
+  # ------------------------------------------------------------------------------------------
+  seguridad:
+    api-key: ${API_KEY:clave-de-desarrollo-no-usar-en-produccion}
+    rutas-publicas:
+      # El balanceador consulta la sonda sin credenciales. Si la protegiéramos, el health check
+      # daría 401, ECS marcaría la tarea como no sana y la reciclaría en bucle.
+      - /actuator/health
+      - /actuator/health/**
+
   motor:
     # Presupuesto total de recolección de contexto. Al agotarse, el motor decide con las
     # señales que ya tiene: llegar tarde a una autorización equivale a no responder.

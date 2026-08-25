@@ -56,6 +56,12 @@ centinela:
       tabla-auditoria: ${TABLA_AUDITORIA}
       tabla-bandeja: ${TABLA_BANDEJA}
 
+  seguridad:
+    # Sin valor por defecto: si la variable no llega, la aplicación no arranca. Es preferible
+    # un contenedor que no levanta a una API de fraude abierta a Internet.
+    # La inyecta Secrets Manager a través del task definition, nunca la imagen.
+    api-key: ${API_KEY}
+
   motor:
     politica:
       # Versionada explícitamente: es lo que queda grabado en cada decisión publicada y lo

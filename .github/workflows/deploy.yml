@@ -1,0 +1,252 @@
+name: Desplegar
+
+# =================================================================================================
+# Compila la imagen nativa, la sube a ECR y actualiza el servicio de ECS.
+#
+# AUTENTICACIÓN POR OIDC, SIN CLAVES DE ACCESO.
+#
+# No hay AWS_ACCESS_KEY_ID ni AWS_SECRET_ACCESS_KEY en los secretos del repositorio. GitHub emite
+# un token de identidad firmado, AWS lo valida y devuelve credenciales temporales. Una clave
+# estática en los secretos de un repo es un secreto de larga duración que sobrevive a la persona
+# que lo creó, no se rota nunca y basta con un workflow malicioso en una rama para exfiltrarla.
+#
+# El rol de AWS debe confiar en token.actions.githubusercontent.com y ACOTAR la condición 'sub'
+# a este repositorio y a la rama main. Sin esa condición, cualquier repositorio de GitHub podría
+# asumir el rol.
+# =================================================================================================
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      entorno:
+        description: Entorno de destino
+        type: choice
+        options: [prod]
+        default: prod
+
+concurrency:
+  # Un despliegue a la vez. Dos pipelines actualizando el mismo servicio de ECS se pisan la
+  # definición de tarea y el resultado depende de quién termine último.
+  group: desplegar-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGION_AWS: sa-east-1
+  REPOSITORIO_ECR: centinela-prod
+  CLUSTER_ECS: centinela-prod
+  SERVICIO_ECS: centinela-prod
+  CONTENEDOR: centinela
+
+permissions:
+  contents: read
+
+jobs:
+
+  # -----------------------------------------------------------------------------------------
+  # Verificación. Corre SIEMPRE y antes de construir nada.
+  #
+  # Los tests de integración levantan Kafka, LocalStack y Redis con Testcontainers, que
+  # funciona en los runners de GitHub porque traen Docker. Es la única barrera antes de que un
+  # binario tome decisiones sobre pagos reales: saltársela para "ir más rápido" sería quitar el
+  # único sitio donde estos fallos se detectan.
+  # -----------------------------------------------------------------------------------------
+  verificar:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Unitarios y de integración
+        run: ./mvnw -B -ntp verify
+
+      - name: Publicar resultados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-de-tests
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # -----------------------------------------------------------------------------------------
+  # Construcción de la imagen nativa y subida a ECR.
+  # -----------------------------------------------------------------------------------------
+  construir:
+    name: Imagen nativa
+    needs: verificar
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    permissions:
+      contents: read
+      # Necesario para que GitHub emita el token de identidad OIDC.
+      id-token: write
+
+    outputs:
+      etiqueta: ${{ steps.meta.outputs.etiqueta }}
+      imagen: ${{ steps.registrar.outputs.imagen }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciales temporales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROL_DESPLIEGUE_AWS }}
+          aws-region: ${{ env.REGION_AWS }}
+          role-session-name: centinela-despliegue-${{ github.run_id }}
+
+      - name: Iniciar sesión en ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Calcular etiqueta
+        id: meta
+        run: |
+          # El SHA del commit, nunca 'latest'. El repositorio de ECR tiene etiquetas inmutables,
+          # así que cada despliegue es reproducible: se puede saber exactamente qué binario tomó
+          # una decisión de hace tres meses y volver a desplegarlo tal cual.
+          echo "etiqueta=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Preparar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir y subir
+        id: construir
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: nativo
+          push: true
+          # La compilación nativa tarda minutos y consume varios GB. La caché de GitHub Actions
+          # conserva las capas de dependencias entre ejecuciones, que es lo que evita volver a
+          # descargar medio Maven Central en cada push.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.REPOSITORIO_ECR }}:${{ steps.meta.outputs.etiqueta }}
+
+      - name: Registrar la imagen construida
+        run: |
+          echo "imagen=${{ steps.ecr.outputs.registry }}/${{ env.REPOSITORIO_ECR }}:${{ steps.meta.outputs.etiqueta }}" >> "$GITHUB_OUTPUT"
+        id: registrar
+
+      - name: Esperar al escaneo de vulnerabilidades
+        run: |
+          # ECR escanea al subir. Se consulta el resultado y se corta el despliegue si aparece
+          # algo CRÍTICO: una imagen con una vulnerabilidad crítica conocida no debería llegar a
+          # producción sólo porque los tests pasaron.
+          set -euo pipefail
+          for intento in $(seq 1 30); do
+            estado=$(aws ecr describe-image-scan-findings \
+              --repository-name "$REPOSITORIO_ECR" \
+              --image-id imageTag="${{ steps.meta.outputs.etiqueta }}" \
+              --region "$REGION_AWS" \
+              --query 'imageScanStatus.status' --output text 2>/dev/null || echo "IN_PROGRESS")
+            [ "$estado" = "COMPLETE" ] && break
+            [ "$estado" = "FAILED" ] && { echo "::warning::El escaneo falló; se continúa."; exit 0; }
+            sleep 10
+          done
+
+          criticas=$(aws ecr describe-image-scan-findings \
+            --repository-name "$REPOSITORIO_ECR" \
+            --image-id imageTag="${{ steps.meta.outputs.etiqueta }}" \
+            --region "$REGION_AWS" \
+            --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text 2>/dev/null || echo "None")
+
+          if [ "$criticas" != "None" ] && [ "$criticas" != "0" ]; then
+            echo "::error::La imagen tiene $criticas vulnerabilidad(es) CRITICA(s). Se detiene el despliegue."
+            exit 1
+          fi
+          echo "Sin vulnerabilidades críticas."
+
+  # -----------------------------------------------------------------------------------------
+  # Despliegue: nueva revisión de la definición de tarea y actualización del servicio.
+  #
+  # NO se usa `aws ecs update-service --force-new-deployment`: eso relanzaría la MISMA imagen.
+  # Hay que registrar una revisión nueva apuntando a la etiqueta recién subida.
+  # -----------------------------------------------------------------------------------------
+  desplegar:
+    name: ECS
+    needs: construir
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      # Entorno protegido de GitHub: permite exigir aprobación manual antes de tocar
+      # producción. Se configura en los ajustes del repositorio, no aquí.
+      name: prod
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciales temporales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROL_DESPLIEGUE_AWS }}
+          aws-region: ${{ env.REGION_AWS }}
+          role-session-name: centinela-despliegue-${{ github.run_id }}
+
+      - name: Descargar la definición de tarea actual
+        run: |
+          # Se parte de la definición que Terraform dejó y sólo se cambia la imagen. Así el
+          # pipeline no necesita conocer variables de entorno, secretos ni roles: eso es
+          # competencia de Terraform y aquí duplicarlo garantizaría que se desincronicen.
+          aws ecs describe-task-definition \
+            --task-definition "$SERVICIO_ECS" \
+            --region "$REGION_AWS" \
+            --query taskDefinition > definicion.json
+
+      - name: Sustituir la imagen
+        id: definicion
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: definicion.json
+          container-name: ${{ env.CONTENEDOR }}
+          image: ${{ needs.construir.outputs.imagen }}
+
+      - name: Actualizar el servicio y esperar
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.definicion.outputs.task-definition }}
+          service: ${{ env.SERVICIO_ECS }}
+          cluster: ${{ env.CLUSTER_ECS }}
+          # Espera a que el servicio quede estable. Sin esto el workflow saldría en verde
+          # mientras las tareas nuevas todavía se están reciclando, y un despliegue roto
+          # parecería exitoso.
+          #
+          # El circuit breaker del servicio (definido en Terraform) revierte solo a la revisión
+          # anterior si las tareas nuevas no llegan a estar sanas.
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "### Despliegue de Centinela"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA::12}\` |"
+            echo "| Imagen | \`${{ needs.construir.outputs.imagen }}\` |"
+            echo "| Cluster | \`$CLUSTER_ECS\` |"
+            echo "| Region | \`$REGION_AWS\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

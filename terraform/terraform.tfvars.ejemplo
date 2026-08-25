@@ -1,0 +1,16 @@
+# Copiar a terraform.tfvars y ajustar. terraform.tfvars esta en .gitignore.
+
+region  = "sa-east-1"
+entorno = "prod"
+
+# Certificado de ACM en la MISMA region que el balanceador.
+arn_certificado = "arn:aws:acm:sa-east-1:000000000000:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# Acotar a los rangos del autorizador y de la red corporativa.
+cidrs_permitidos = ["203.0.113.0/24"]
+
+# El pipeline la sobreescribe con el SHA del commit.
+etiqueta_imagen = "latest"
+
+tareas_minimas = 2
+tareas_maximas = 10
