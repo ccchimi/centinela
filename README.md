@@ -4,6 +4,10 @@ Motor de detección de fraude transaccional en tiempo real. Consume autorizacion
 las evalúa dentro del presupuesto de latencia de la autorización y emite un veredicto con la
 evidencia que lo sostiene.
 
+> **¿Vienes de clonar el repositorio?** El manual paso a paso para levantar todo el stack en tu
+> máquina está en **[INICIALIZACION.md](INICIALIZACION.md)**: un solo comando, una petición de
+> prueba y las URLs de Grafana y Jaeger para ver el flujo de datos.
+
 **Estado:** iteración 6 — API autenticada, infraestructura como código y pipeline de despliegue. Imagen nativa con GraalVM sobre distroless,
 ecosistema completo en `docker compose`, configuración 12-Factor por perfiles. 163 tests
 unitarios (sin contenedores, ~7 s) + 26 de integración contra Kafka, LocalStack y Redis reales.
