@@ -315,6 +315,25 @@ siguen llegando a Jaeger igual que si la aplicación estuviera en un contenedor.
 >
 > Es la regla haciendo su trabajo, no un fallo del proyecto. Instalarlo en Windows:
 > `winget install --id EclipseAdoptium.Temurin.25.JDK`
+>
+> **Instalarlo no basta.** `mvnw` usa `JAVA_HOME`, y si esa variable no existe cae al `java` del
+> `PATH`, que seguirá siendo el JDK anterior. El síntoma es exactamente el mismo error del
+> enforcer *después* de haber instalado el 25.
+
+En Windows, [`jdk25.ps1`](jdk25.ps1) resuelve eso sin tocar la configuración del sistema:
+
+```powershell
+. .\jdk25.ps1
+```
+
+El punto y el espacio del principio son obligatorios (*dot sourcing*): sin ellos PowerShell
+ejecuta el script en un proceso hijo, las variables mueren con él y `mvnw` sigue viendo el JDK
+de siempre.
+
+Busca el JDK 25 instalado, elige el build más reciente si hay varios y lo deja activo **sólo en
+esa terminal**. No modifica `JAVA_HOME` a nivel de usuario a propósito: Java 25 es compatible
+hacia atrás, pero cambiar el Java por defecto de toda la máquina puede romper otros proyectos
+con herramientas más antiguas.
 
 ```bash
 ./mvnw test
@@ -352,4 +371,5 @@ En Git Bash hay que anteponer `MSYS_NO_PATHCONV=1` para que no reescriba las rut
 | `401 No autorizado` en la API | Falta la cabecera `X-API-KEY` o su valor no es el correcto |
 | `docker exec centinela-kafka kafka-topics.sh` da "not found" | `apache/kafka-native` no trae los scripts. Usa un contenedor `apache/kafka:3.9.1` como en el [paso 6](#6-la-otra-puerta-kafka) |
 | Las evaluaciones salen siempre `degradada: true` | El perfil del cliente aún no tiene historial. Es correcto: ver el [paso 5](#5-hacer-que-el-motor-decida) |
-| `./mvnw test` falla con *"Se requiere JDK 25 o superior"* | Tenés un JDK anterior. Es el `maven-enforcer-plugin` cortando antes de compilar. Instalá el 25 o usa el contenedor: ver [Tests](#tests) |
+| `./mvnw test` falla con *"Se requiere JDK 25 o superior"* | Tenés un JDK anterior. Es el `maven-enforcer-plugin` cortando antes de compilar. Ver [Tests](#tests) |
+| Instalaste el JDK 25 y el error del enforcer **sigue igual** | `JAVA_HOME` no apunta al 25, o no existe y `mvnw` cae al `java` del `PATH`. En Windows: `. .\jdk25.ps1` |
