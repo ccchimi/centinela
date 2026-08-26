@@ -1,16 +1,82 @@
-# Copiar a terraform.tfvars y ajustar. terraform.tfvars esta en .gitignore.
+# =================================================================================================
+# Copiar a terraform.tfvars y ajustar. terraform.tfvars está en .gitignore y NO debe subirse:
+# contiene los rangos de red que pueden alcanzar la API, que es información que no interesa
+# publicar.
+#
+#   cp terraform.tfvars.ejemplo terraform.tfvars
+#
+# Sólo hay una variable obligatoria: arn_certificado. Todas las demás tienen un valor por defecto
+# razonable en variables.tf, y aquí aparecen para que se vean y se decidan a conciencia.
+# =================================================================================================
 
 region  = "us-east-1"
 entorno = "prod"
 
-# Certificado de ACM en la MISMA region que el balanceador.
+
+# -------------------------------------------------------------------------------------------------
+# OBLIGATORIA. Certificado de ACM para el listener HTTPS.
+#
+# No tiene valor por defecto a propósito: sin TLS, la clave de la cabecera X-API-KEY viajaría en
+# claro y cualquiera en el camino podría reutilizarla.
+#
+# Tiene que estar en la MISMA región que el balanceador, y en estado ISSUED. Un certificado en
+# PENDING_VALIDATION deja el listener creado pero sin servir tráfico.
+#
+#   aws acm request-certificate --domain-name api.tudominio.com \
+#     --validation-method DNS --region us-east-1
+#
+# Después hay que crear el registro CNAME de validación en el DNS del dominio. Si el dominio está
+# en Route53, `aws acm describe-certificate` da el registro; si está en otro proveedor, se crea a
+# mano en su panel.
+# -------------------------------------------------------------------------------------------------
+
 arn_certificado = "arn:aws:acm:us-east-1:000000000000:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
-# Acotar a los rangos del autorizador y de la red corporativa.
+
+# -------------------------------------------------------------------------------------------------
+# ACOTAR ESTO ANTES DEL PRIMER APPLY.
+#
+# El valor por defecto en variables.tf es 0.0.0.0/0, que expone la API a todo internet con la
+# clave compartida como única barrera. Aquí van los rangos del autorizador y de la red corporativa.
+#
+# La clave de API es la segunda barrera, no la primera.
+# -------------------------------------------------------------------------------------------------
+
 cidrs_permitidos = ["203.0.113.0/24"]
 
-# El pipeline la sobreescribe con el SHA del commit.
+
+# -------------------------------------------------------------------------------------------------
+# Servicio
+# -------------------------------------------------------------------------------------------------
+
+# El pipeline la sobreescribe con el SHA del commit. 'latest' sólo sirve para el primer apply,
+# cuando todavía no hay ninguna imagen subida.
 etiqueta_imagen = "latest"
 
+# Dos como mínimo: una sola tarea significa una ventana sin servicio en cada despliegue.
 tareas_minimas = 2
 tareas_maximas = 10
+
+# 1024 = 1 vCPU. El binario nativo arranca en 0,24 s y consume ~100 MiB en reposo, así que esto
+# se dimensiona por el trabajo de evaluación, no por el calentamiento de una JVM.
+cpu_tarea     = 1024
+memoria_tarea = 2048
+
+
+# -------------------------------------------------------------------------------------------------
+# Kafka
+# -------------------------------------------------------------------------------------------------
+
+# Debe ser >= spring.kafka.listener.concurrency por tarea x número de tareas, o habrá consumidores
+# ociosos. Con 3 de concurrencia y 2 tareas, 6 es el mínimo útil.
+#
+# OJO: el número de particiones lo fija la primera tarea que arranca, porque los topics los crea la
+# aplicación y no Terraform. Ampliarlo después es una operación de Kafka, no un `terraform apply`.
+particiones_por_topic = 6
+
+
+# -------------------------------------------------------------------------------------------------
+# Retención
+# -------------------------------------------------------------------------------------------------
+
+retencion_logs_dias = 30

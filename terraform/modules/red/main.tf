@@ -130,6 +130,30 @@ resource "aws_vpc_endpoint" "dynamodb" {
   tags = { Name = "${local.prefijo}-dynamodb" }
 }
 
+# -------------------------------------------------------------------------------------------------
+# S3, y no es opcional aunque Centinela no use S3.
+#
+# ECR guarda las CAPAS de imagen en S3 y sólo los metadatos en el registro. Los endpoints de
+# ecr.api y ecr.dkr resuelven la autenticación y el manifiesto, pero la descarga del binario en sí
+# va a S3. Sin este endpoint, y con las tareas en subredes privadas sin IP pública, cada arranque
+# de tarea baja 338 MB por el NAT Gateway y paga el procesamiento por GB.
+#
+# El síntoma cuando falta y además no hay NAT es de los caros de diagnosticar: la tarea se queda en
+# PENDING y muere por timeout al extraer la imagen, con ECR aparentemente accesible porque el
+# login sí funcionaba.
+#
+# Los endpoints de tipo Gateway NO tienen coste horario ni por GB. Este es ahorro puro.
+# -------------------------------------------------------------------------------------------------
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.esta.id
+  service_name      = "com.amazonaws.${var.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = aws_route_table.privada[*].id
+
+  tags = { Name = "${local.prefijo}-s3" }
+}
+
 resource "aws_security_group" "endpoints" {
   name        = "${local.prefijo}-endpoints"
   description = "Endpoints de interfaz de la VPC"

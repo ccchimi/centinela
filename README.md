@@ -401,9 +401,14 @@ que alguien acabaría olvidando.
 
 ## Despliegue en AWS
 
+> **El runbook completo está en [DESPLIEGUE.md](DESPLIEGUE.md)**: los ocho pasos, cuál de ellos
+> es el único que cuesta dinero y el coste real verificado contra la API de precios de AWS.
+
 ```
 terraform/
-├── main.tf, variables.tf, outputs.tf, versions.tf
+├── bootstrap/        proveedor OIDC + rol de despliegue + bucket del estado   (8 recursos)
+│                     Gratis y se aplica UNA vez, antes que nada
+├── main.tf, variables.tf, outputs.tf, versions.tf                            (62 recursos)
 └── modules/
     ├── red/          VPC, 3 zonas, NAT por zona, endpoints, grupos de seguridad
     ├── ecr/          registro con etiquetas inmutables y purga automática
@@ -412,11 +417,20 @@ terraform/
     └── servicio/     ECS Fargate, ALB, IAM, logs, autoescalado
 ```
 
+El **bootstrap va aparte** por dos motivos, y ninguno es estético: el bucket del estado no puede
+vivir en el stack cuyo estado guarda, y crear un rol de IAM no debería exigir aprobar el gasto de
+los otros 62 recursos.
+
+```bash
+cd terraform/bootstrap && terraform init && terraform apply
+```
+
 ```bash
 cd terraform && terraform init && terraform plan -out=plan.tfplan
 ```
 
-Validado con `terraform validate` y `terraform fmt` contra el provider AWS 6.x.
+Ambos validados con `terraform validate` y `terraform fmt` contra el provider AWS 6.x:
+`Plan: 8 to add` y `Plan: 62 to add`, sin cambios ni destrucciones.
 
 ### Antes del primer `apply`
 
@@ -774,8 +788,9 @@ dos capas con propósitos distintos, no una duplicada.
 
 ## Pendiente
 
-1. **Rol de OIDC en Terraform.** El pipeline asume `ROL_DESPLIEGUE_AWS`, pero ese rol y su
-   política de confianza todavía se crean a mano. Es lo siguiente que debería entrar en IaC.
+1. ~~**Rol de OIDC en Terraform.**~~ **Resuelto**: vive en `terraform/bootstrap/`, con la
+   condición `sub` acotada al repositorio y a la rama, y `iam:PassRole` limitado a los dos roles
+   de Centinela y sólo hacia `ecs-tasks.amazonaws.com`.
 2. **Rotación de la clave de API.** Hoy es un valor en Secrets Manager que se cambia a mano y
    exige un redespliegue. Aceptar dos claves válidas a la vez permitiría rotarla sin ventana.
 3. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
