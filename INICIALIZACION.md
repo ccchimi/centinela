@@ -290,14 +290,15 @@ Los perfiles de compose se solapan, de modo que `completo` contiene a `app` y a 
 | `docker compose --profile completo up -d` | Todo |
 
 Lo habitual mientras se desarrolla es levantar la infraestructura y la observabilidad en compose
-y ejecutar la aplicación desde el IDE. Para eso sí hace falta **JDK 25**:
+y ejecutar la aplicación desde el IDE o con Maven. Eso sí necesita **JDK 25** en la terminal
+(ver [Tests](#tests)):
 
 ```bash
 docker compose --profile obs up -d
 ```
 
-```bash
-./mvnw spring-boot:run
+```powershell
+. .\jdk25.ps1; ./mvnw spring-boot:run
 ```
 
 El perfil `local` es el activo por defecto y ya apunta a `localhost:4318`, así que las trazas
@@ -305,46 +306,63 @@ siguen llegando a Jaeger igual que si la aplicación estuviera en un contenedor.
 
 ### Tests
 
-> **Hace falta JDK 25.** Con una versión anterior, el `maven-enforcer-plugin` corta el build
-> antes de compilar nada:
->
-> ```
-> Rule 0: RequireJavaVersion failed with message:
-> Se requiere JDK 25 o superior para compilar Centinela.
-> ```
->
-> Es la regla haciendo su trabajo, no un fallo del proyecto. Instalarlo en Windows:
-> `winget install --id EclipseAdoptium.Temurin.25.JDK`
->
-> **Instalarlo no basta.** `mvnw` usa `JAVA_HOME`, y si esa variable no existe cae al `java` del
-> `PATH`, que seguirá siendo el JDK anterior. El síntoma es exactamente el mismo error del
-> enforcer *después* de haber instalado el 25.
-
-En Windows, [`jdk25.ps1`](jdk25.ps1) resuelve eso sin tocar la configuración del sistema:
+Centinela exige **JDK 25**. En Windows, actívalo en la terminal antes de nada:
 
 ```powershell
 . .\jdk25.ps1
 ```
 
-El punto y el espacio del principio son obligatorios (*dot sourcing*): sin ellos PowerShell
+**El punto y el espacio del principio son obligatorios.** Es *dot sourcing*: sin ellos PowerShell
 ejecuta el script en un proceso hijo, las variables mueren con él y `mvnw` sigue viendo el JDK
-de siempre.
+anterior sin avisar de nada.
 
-Busca el JDK 25 instalado, elige el build más reciente si hay varios y lo deja activo **sólo en
-esa terminal**. No modifica `JAVA_HOME` a nivel de usuario a propósito: Java 25 es compatible
-hacia atrás, pero cambiar el Java por defecto de toda la máquina puede romper otros proyectos
-con herramientas más antiguas.
+[`jdk25.ps1`](jdk25.ps1) busca el JDK 25 instalado, elige el build más reciente si hay varios y lo
+deja activo **sólo en esa terminal**. Hay que repetirlo en cada terminal nueva: no modifica
+`JAVA_HOME` a nivel de usuario a propósito, porque cambiar el Java por defecto de toda la máquina
+puede romper otros proyectos con herramientas más antiguas.
+
+Ya con eso:
 
 ```bash
 ./mvnw test
 ```
 
-Unitarios (176), sin Docker, en torno a 2 minutos. Para la suite completa, incluyendo los de
-integración con Testcontainers:
+176 unitarios, sin Docker. Unos 20 segundos con la caché de Maven caliente, un par de minutos la
+primera vez.
 
 ```bash
 ./mvnw verify
 ```
+
+La suite completa, incluidos los de integración con Testcontainers. Necesita Docker en marcha.
+
+Si abriste una terminal nueva, las dos cosas de una vez:
+
+```powershell
+. .\jdk25.ps1; ./mvnw test
+```
+
+> En Git Bash, macOS o Linux no hace falta el script: basta con exportar la variable.
+> `export JAVA_HOME=/ruta/al/jdk-25 && export PATH="$JAVA_HOME/bin:$PATH"`
+
+#### Si el enforcer se queja
+
+```
+Rule 0: RequireJavaVersion failed with message:
+Se requiere JDK 25 o superior para compilar Centinela.
+```
+
+Es el `maven-enforcer-plugin` cortando antes de compilar nada. Dos causas, por orden de
+frecuencia:
+
+1. **No ejecutaste `. .\jdk25.ps1` en esta terminal.** Es lo más común: el script sólo afecta a
+   la sesión donde se ejecuta, y al abrir otra hay que repetirlo.
+2. **No tenés el JDK 25 instalado.** `winget install --id EclipseAdoptium.Temurin.25.JDK`
+
+> **Instalarlo no basta por sí solo.** `mvnw` usa `JAVA_HOME` y, si esa variable no existe, cae
+> al `java` del `PATH`, que seguirá siendo el JDK anterior. El síntoma es exactamente el mismo
+> error *después* de haber instalado el 25, que es justo el momento en que uno deja de sospechar
+> del JDK.
 
 #### Sin instalar JDK 25
 
@@ -357,6 +375,7 @@ docker run --rm -v "${PWD}:/proyecto" -v "${HOME}/.m2:/root/.m2" -w /proyecto --
 ```
 
 En Git Bash hay que anteponer `MSYS_NO_PATHCONV=1` para que no reescriba las rutas del montaje.
+Tarda unos 2 minutos, más que en local, porque arranca el contenedor cada vez.
 
 ---
 
@@ -372,4 +391,4 @@ En Git Bash hay que anteponer `MSYS_NO_PATHCONV=1` para que no reescriba las rut
 | `docker exec centinela-kafka kafka-topics.sh` da "not found" | `apache/kafka-native` no trae los scripts. Usa un contenedor `apache/kafka:3.9.1` como en el [paso 6](#6-la-otra-puerta-kafka) |
 | Las evaluaciones salen siempre `degradada: true` | El perfil del cliente aún no tiene historial. Es correcto: ver el [paso 5](#5-hacer-que-el-motor-decida) |
 | `./mvnw test` falla con *"Se requiere JDK 25 o superior"* | Tenés un JDK anterior. Es el `maven-enforcer-plugin` cortando antes de compilar. Ver [Tests](#tests) |
-| Instalaste el JDK 25 y el error del enforcer **sigue igual** | `JAVA_HOME` no apunta al 25, o no existe y `mvnw` cae al `java` del `PATH`. En Windows: `. .\jdk25.ps1` |
+| Instalaste el JDK 25 y el error del enforcer **sigue igual** | Falta ejecutar `. .\jdk25.ps1` **en esa terminal**. Sólo dura mientras la sesión siga abierta |
