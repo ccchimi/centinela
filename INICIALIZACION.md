@@ -305,15 +305,39 @@ siguen llegando a Jaeger igual que si la aplicación estuviera en un contenedor.
 
 ### Tests
 
+> **Hace falta JDK 25.** Con una versión anterior, el `maven-enforcer-plugin` corta el build
+> antes de compilar nada:
+>
+> ```
+> Rule 0: RequireJavaVersion failed with message:
+> Se requiere JDK 25 o superior para compilar Centinela.
+> ```
+>
+> Es la regla haciendo su trabajo, no un fallo del proyecto. Instalarlo en Windows:
+> `winget install --id EclipseAdoptium.Temurin.25.JDK`
+
 ```bash
 ./mvnw test
 ```
 
-Unitarios, sin Docker. Para la suite completa, incluyendo los de integración con Testcontainers:
+Unitarios (176), sin Docker, en torno a 2 minutos. Para la suite completa, incluyendo los de
+integración con Testcontainers:
 
 ```bash
 ./mvnw verify
 ```
+
+#### Sin instalar JDK 25
+
+Si no querés tocar el JDK de tu máquina, los tests corren dentro de la misma imagen de GraalVM
+que usa el `Dockerfile`, que ya lleva JDK 25. Se monta el proyecto y el repositorio local de
+Maven para reutilizar las dependencias ya descargadas:
+
+```bash
+docker run --rm -v "${PWD}:/proyecto" -v "${HOME}/.m2:/root/.m2" -w /proyecto --entrypoint /bin/bash ghcr.io/graalvm/native-image-community:25 -c "./mvnw -B -ntp test"
+```
+
+En Git Bash hay que anteponer `MSYS_NO_PATHCONV=1` para que no reescriba las rutas del montaje.
 
 ---
 
@@ -328,3 +352,4 @@ Unitarios, sin Docker. Para la suite completa, incluyendo los de integración co
 | `401 No autorizado` en la API | Falta la cabecera `X-API-KEY` o su valor no es el correcto |
 | `docker exec centinela-kafka kafka-topics.sh` da "not found" | `apache/kafka-native` no trae los scripts. Usa un contenedor `apache/kafka:3.9.1` como en el [paso 6](#6-la-otra-puerta-kafka) |
 | Las evaluaciones salen siempre `degradada: true` | El perfil del cliente aún no tiene historial. Es correcto: ver el [paso 5](#5-hacer-que-el-motor-decida) |
+| `./mvnw test` falla con *"Se requiere JDK 25 o superior"* | Tenés un JDK anterior. Es el `maven-enforcer-plugin` cortando antes de compilar. Instalá el 25 o usa el contenedor: ver [Tests](#tests) |
