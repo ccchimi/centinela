@@ -24,6 +24,10 @@ unitarios (sin contenedores, ~7 s) + 26 de integración contra Kafka, LocalStack
 | GraalVM Native Build Tools | 1.1.8 | gestionado por el parent de Spring Boot |
 | Imagen de compilación | `ghcr.io/graalvm/native-image-community:25` | no existe variante para JDK 26 |
 | Imagen final | `gcr.io/distroless/base-debian12` | glibc + OpenSSL + certificados, sin shell |
+| Micrometer Tracing | 1.7.1 | `spring-boot-starter-opentelemetry`, exportador OTLP |
+| Jaeger | `jaegertracing/jaeger:2.5.0` | v2: recibe OTLP de forma nativa, sólo en local |
+| Prometheus | `prom/prometheus:v3.5.0` | scraping de `/actuator/prometheus`, sólo en local |
+| Grafana |  `grafana/grafana:12.3.0` | fuentes y panel aprovisionados, sólo en local |
 
 Todas las versiones se comprobaron contra Maven Central el 2026-08-24 y son las últimas
 **GA**. Se descartaron deliberadamente `spring-boot-starter-parent:4.2.0-M1` y
@@ -220,6 +224,29 @@ nivel es siempre el envoltorio de Spring Kafka.
 
 ## Levantar el ecosistema
 
+Todo el entorno simulado —infraestructura, aplicación nativa y observabilidad— con un solo
+comando:
+
+```bash
+docker compose --profile completo up -d --build
+```
+
+| | |
+|---|---|
+| API de Centinela | <http://localhost:8080> |
+| Grafana (métricas, sin login) | <http://localhost:3000> |
+| Jaeger (trazas) | <http://localhost:16686> |
+| Prometheus | <http://localhost:9090> |
+
+Los perfiles se pueden combinar por separado según lo que haga falta:
+
+| Comando | Levanta |
+|---|---|
+| `docker compose up -d` | Kafka, LocalStack, Redis |
+| `docker compose --profile app up -d` | ...además la aplicación nativa |
+| `docker compose --profile obs up -d` | ...además Jaeger, Prometheus y Grafana |
+| `docker compose --profile completo up -d` | Todo |
+
 Toda la infraestructura (Kafka en KRaft, LocalStack con las tablas ya creadas, Redis):
 
 ```bash
@@ -257,8 +284,44 @@ curl -s -X POST localhost:8080/api/v1/evaluaciones -H 'Content-Type: application
 Y bajarlo todo:
 
 ```bash
-docker compose --profile app down -v
+docker compose --profile completo down -v
 ```
+
+### Observabilidad local
+
+El stack de observabilidad reproduce en la máquina lo que en AWS harían CloudWatch y X-Ray, con
+coste cero y sin desplegar nada:
+
+- **Jaeger** recibe las trazas por OTLP en el puerto 4318. El perfil `local` muestrea al 100 %.
+  Lo que aparece instrumentado, comprobado sobre el binario nativo en ejecución:
+
+  | Origen del span | Ejemplo |
+  |---|---|
+  | Entrada HTTP | `http post /api/v1/evaluaciones` |
+  | Comandos de Redis (Lettuce) | `eval`, `evalsha` |
+  | Tareas programadas | `task planificadorDelRelevo.publicarPendientes` |
+  | Productor y consumidor de Kafka | activado en `local` con `observation-enabled` |
+
+  **Lo que NO tiene spans, y conviene saberlo:** las llamadas a DynamoDB —el AWS SDK v2 no está
+  instrumentado por Micrometer; haría falta la instrumentación OTel del SDK— y el motor de
+  reglas, que no lleva anotaciones a propósito ([ADR-0008](#adr-0008)). El motor se observa por
+  su efecto: la latencia del span HTTP que lo envuelve y la decisión publicada en Kafka. Poner
+  spans dentro del dominio es el punto 6 de [Pendiente](#pendiente), junto con las métricas de
+  negocio.
+- **Prometheus** hace *scraping* de `/actuator/prometheus` cada 5 s. No hay *push*: es el mismo
+  modelo que se usaría en producción, así que lo que se ve aquí es representativo.
+- **Grafana** arranca con la fuente de datos y el panel ya cargados desde `infra/grafana/`. No
+  hay que dar de alta nada a mano ni iniciar sesión.
+
+Los tres son efímeros a propósito: almacenamiento en memoria y sin volúmenes. `docker compose
+down` deja la máquina como estaba. Lo único que se conserva son los paneles, porque viven en el
+repositorio y no dentro de un volumen de Docker.
+
+> **Las trazas están apagadas por defecto fuera de `local`.** El exportador OTLP de Spring Boot
+> viene activo de fábrica y, sin endpoint, cae a `http://localhost:4318`: en un entorno sin
+> colector eso llena el log de errores de conexión. `application.yml` lo desactiva
+> (`OTLP_TRAZAS_HABILITADO`) y el perfil `local` lo vuelve a encender, que es donde hay algo
+> escuchando.
 
 > Las tablas de DynamoDB las crea `infra/localstack/crear-tablas.sh`, que LocalStack ejecuta
 > solo al arrancar. Incluye el **índice disperso** del outbox: sin él el relevo no encuentra

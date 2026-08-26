@@ -1,11 +1,20 @@
 # =================================================================================================
 # Ecosistema completo de Centinela para desarrollo local.
 #
+#   docker compose --profile completo up -d   TODO: infra + aplicación + observabilidad
+#
 #   docker compose up -d                      sólo la infraestructura (Kafka, LocalStack, Redis)
 #   docker compose --profile app up -d        además la aplicación nativa
+#   docker compose --profile obs up -d        además Jaeger, Prometheus y Grafana
 #
 # La aplicación está en un perfil de compose aparte a propósito: lo habitual mientras se
-# desarrolla es levantar la infraestructura y ejecutar la app desde el IDE.
+# desarrolla es levantar la infraestructura y ejecutar la app desde el IDE. Los perfiles se
+# solapan ('completo' contiene a 'app' y a 'obs'), así que cualquiera de las dos formas de
+# trabajar tiene un único comando.
+#
+# Puertos publicados:
+#   8080  API de Centinela          16686  Jaeger (trazas)
+#   9090  Prometheus                 3000  Grafana (anónimo, sin login)
 # =================================================================================================
 
 name: centinela
@@ -95,7 +104,7 @@ services:
       target: nativo
     image: centinela:nativo
     container_name: centinela-app
-    profiles: ["app"]
+    profiles: ["app", "completo"]
     depends_on:
       kafka:
         condition: service_healthy
@@ -117,6 +126,14 @@ services:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       LOG_LEVEL_CENTINELA: DEBUG
+      # Trazas a Jaeger. Desde la red de compose el colector es 'jaeger', no localhost.
+      #
+      # No se declara depends_on de jaeger a propósito: el exportador OTLP encola y reintenta,
+      # así que la app arranca igual sin colector y las trazas empiezan a llegar cuando Jaeger
+      # esté listo. Acoplar el arranque del motor a su observabilidad sería exactamente el tipo
+      # de dependencia que no se quiere en producción.
+      OTLP_TRAZAS_HABILITADO: "true"
+      OTLP_TRAZAS_ENDPOINT: http://jaeger:4318/v1/traces
       # Ver la nota en application-local.yml: LocalStack no responde en los 120 ms que se
       # esperan de DynamoDB real, y con el valor de producción toda evaluación se degrada.
       AWS_TIMEOUT_API_CALL: 10s
@@ -127,3 +144,86 @@ services:
       # desde fuera: se comprueba con wget del contenedor de Kafka en el README. Aquí se deja
       # sin healthcheck a propósito en vez de meter utilidades en una imagen distroless.
       disable: true
+
+  # -----------------------------------------------------------------------------------------
+  # OBSERVABILIDAD. Perfil 'obs'.
+  #
+  # Los tres servicios son efímeros a propósito: almacenamiento en memoria en Jaeger y sin
+  # volumen persistente en Prometheus ni en Grafana. Esto es un banco de pruebas, no un entorno
+  # de retención, y que `docker compose down` deje la máquina como estaba es una característica.
+  # Lo que hay que conservar —los paneles— vive en infra/grafana/, versionado en el repositorio.
+  # -----------------------------------------------------------------------------------------
+
+  # Jaeger v2: el binario es un colector de OpenTelemetry, así que recibe OTLP de forma nativa
+  # y no hace falta el COLLECTOR_OTLP_ENABLED que pedía la serie 1.x.
+  jaeger:
+    image: jaegertracing/jaeger:2.5.0
+    container_name: centinela-jaeger
+    profiles: ["obs", "completo"]
+    ports:
+      - "16686:16686"   # interfaz web
+      - "4318:4318"     # OTLP sobre HTTP, que es el que usa el exportador de Spring Boot
+      - "4317:4317"     # OTLP sobre gRPC, por si se quiere apuntar otro cliente
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16686/"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: centinela-prometheus
+    profiles: ["obs", "completo"]
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # Docker Desktop define host.docker.internal solo; en Linux hay que mapearlo a mano. Sin
+      # esto, el scrape de la aplicación falla en Linux y el resto del stack parece roto.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana:12.3.0
+    container_name: centinela-grafana
+    profiles: ["obs", "completo"]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      # Sin login: es un entorno local y desechable, y pedir credenciales en cada arranque para
+      # mirar un gráfico sobra. En cualquier despliegue real esto NO se hace.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      # Viewer y no Admin: Grafana ya sólo admite Viewer para el usuario anónimo y cualquier
+      # otro valor deja un aviso de deprecación en el arranque.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+      # Abre directamente el panel de Centinela en vez de la portada vacía de Grafana.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/centinela.json
+      GF_LOG_LEVEL: warn
+    volumes:
+      # Se montan los dos subdirectorios y NO el 'provisioning' entero: Grafana espera también
+      # 'plugins' y 'alerting' ahí dentro, y montar el padre en sólo lectura los oculta y deja
+      # dos errores en el arranque por directorios que no existen.
+      - ./infra/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s

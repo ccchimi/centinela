@@ -1,0 +1,28 @@
+# =================================================================================================
+# Fuentes de datos aprovisionadas al arrancar. Sin esto habría que darlas de alta a mano en la UI
+# cada vez que se recrea el volumen, y "un solo comando" dejaría de ser cierto.
+# =================================================================================================
+
+apiVersion: 1
+
+datasources:
+
+  - name: Prometheus
+    type: prometheus
+    uid: centinela-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 5s
+      # Enlaza una métrica con la traza correspondiente: Micrometer añade el trace_id a los
+      # exemplars y Grafana los convierte en un salto directo a Jaeger.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: centinela-jaeger
+
+  - name: Jaeger
+    type: jaeger
+    uid: centinela-jaeger
+    access: proxy
+    url: http://jaeger:16686

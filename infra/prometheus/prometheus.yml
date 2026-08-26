@@ -1,0 +1,39 @@
+# =================================================================================================
+# Prometheus para el entorno local de Centinela.
+#
+# Sólo hace scraping: la aplicación no empuja nada. Es la misma forma en que se recogerían las
+# métricas en producción desde un agente en ECS, así que lo que se ve aquí es representativo y no
+# un montaje distinto para la demo.
+# =================================================================================================
+
+global:
+  # 5s y no los 15s habituales: en local se levanta el entorno, se lanzan unas evaluaciones y se
+  # mira el gráfico. Con 15s una prueba corta cabe en dos o tres puntos y no se ve nada.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    entorno: local
+
+scrape_configs:
+
+  # -----------------------------------------------------------------------------------------
+  # La aplicación.
+  #
+  # El destino es host.docker.internal y NO centinela:8080 a propósito. La app se ejecuta de dos
+  # maneras durante el desarrollo: dentro de compose (perfil 'app') o desde el IDE contra la
+  # infraestructura de compose. Con el nombre de servicio, el segundo caso deja el target caído;
+  # a través del host funcionan los dos, porque el contenedor publica 8080 igualmente.
+  #
+  # extra_hosts en docker-compose.yml mapea ese nombre también en Linux, donde Docker no lo
+  # define solo como sí hace Docker Desktop.
+  # -----------------------------------------------------------------------------------------
+  - job_name: centinela
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          servicio: centinela
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

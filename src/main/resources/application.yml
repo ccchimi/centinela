@@ -267,6 +267,29 @@ management:
       # Muestreo bajo en el flujo caliente; las decisiones de bloqueo se trazan siempre desde
       # el propio adaptador, con independencia de esta probabilidad.
       probability: ${TRACING_SAMPLE_RATE:0.05}
+    export:
+      otlp:
+        # Apagado por defecto A PROPOSITO. El exportador OTLP de Spring Boot viene activo de
+        # fabrica y, sin endpoint configurado, cae a http://localhost:4318: un entorno sin
+        # colector llenaria el log de errores de conexion cada schedule-delay. Se enciende
+        # donde hay algo escuchando (el perfil 'local' lo hace) y en produccion queda a una
+        # variable de entorno de distancia el dia que haya un colector.
+        enabled: ${OTLP_TRAZAS_HABILITADO:false}
+
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTLP_TRAZAS_ENDPOINT:http://localhost:4318/v1/traces}
+
+  otlp:
+    metrics:
+      export:
+        # Las metricas NO salen por OTLP: las recoge Prometheus por scraping de
+        # /actuator/prometheus. spring-boot-starter-opentelemetry arrastra
+        # micrometer-registry-otlp con el export activo por defecto, asi que hay que apagarlo
+        # explicitamente o se empujarian por duplicado a un colector que aqui no existe.
+        enabled: false
 
 server:
   shutdown: graceful

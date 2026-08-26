@@ -3,6 +3,7 @@ package com.centinela.fraude.infraestructura.config;
 import com.centinela.fraude.dominio.excepcion.ViolacionDeInvariante;
 import com.centinela.fraude.infraestructura.adaptador.entrada.contrato.EventoInvalidoException;
 import com.centinela.fraude.infraestructura.adaptador.salida.kafka.SerializadorDeDescartes;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -11,11 +12,14 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.MicrometerProducerListener;
 import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
@@ -83,14 +87,34 @@ public class ConfiguracionDeKafka {
      * lo resuelve {@link SerializadorDeDescartes}.
      */
     @Bean
-    KafkaTemplate<String, Object> plantillaDeDescartes(ProducerFactory<?, ?> fabricaAutoconfigurada) {
+    KafkaTemplate<String, Object> plantillaDeDescartes(
+            ProducerFactory<?, ?> fabricaAutoconfigurada,
+            KafkaProperties propiedadesDeKafka,
+            ObjectProvider<MeterRegistry> registroDeMetricas) {
+
         Map<String, Object> configuracion = new HashMap<>(fabricaAutoconfigurada.getConfigurationProperties());
         configuracion.remove(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG);
         configuracion.remove(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG);
 
         var fabrica = new DefaultKafkaProducerFactory<String, Object>(
                 configuracion, new StringSerializer(), new SerializadorDeDescartes());
-        return new KafkaTemplate<>(fabrica);
+
+        // Métricas del productor (kafka_producer_*). Spring Boot las engancha a la fábrica que
+        // autoconfigura, pero esta se construye con new y se queda fuera: sin este listener el
+        // productor no publica una sola métrica y el panel de Grafana sale vacío sin motivo
+        // aparente. ObjectProvider porque en los tests de rebanada no siempre hay registro.
+        registroDeMetricas.ifAvailable(registro -> fabrica.addListener(new MicrometerProducerListener<>(registro)));
+
+        var plantilla = new KafkaTemplate<>(fabrica);
+
+        // Mismo caso con las trazas: spring.kafka.template.observation-enabled sólo aplica a la
+        // plantilla autoconfigurada. Se lee la propiedad y se propaga a mano para que el valor
+        // del perfil activo mande, en vez de fijar aquí un true que se saltaría la decisión de
+        // producción. Con esto el span del productor cuelga de la petición que lo originó y el
+        // contexto viaja en las cabeceras del mensaje hasta el consumidor.
+        plantilla.setObservationEnabled(propiedadesDeKafka.getTemplate().isObservationEnabled());
+
+        return plantilla;
     }
 
     @Bean

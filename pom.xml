@@ -72,6 +72,27 @@
       <artifactId>micrometer-registry-prometheus</artifactId>
       <scope>runtime</scope>
     </dependency>
+    <!--
+      Puente de trazas a OpenTelemetry y exportador OTLP.
+
+      El actuator y micrometer-registry-prometheus por si solos dan METRICAS, no TRAZAS: la
+      aplicacion ya emitia observaciones por la Observation API y honraba
+      management.tracing.sampling.probability, pero sin exportador nadie las recogia y los
+      spans se descartaban al cerrarse. Este starter es la pieza que faltaba en la cadena.
+
+      Es el starter y no micrometer-tracing-bridge-otel a secas: en Spring Boot 4 la
+      autoconfiguracion vive en el modulo spring-boot-micrometer-tracing-opentelemetry, y sin
+      el las propiedades management.opentelemetry.* se ignorarian en silencio. Mismo motivo
+      que spring-boot-starter-kafka mas abajo.
+
+      Arrastra tambien micrometer-registry-otlp, cuyo export esta ACTIVO por defecto y
+      empujaria metricas a un colector inexistente. Se apaga en application.yml: aqui las
+      metricas se recogen por scraping de Prometheus.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-opentelemetry</artifactId>
+    </dependency>
 
     <!-- ==================== Mensajeria ==================== -->
     <!--

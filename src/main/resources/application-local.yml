@@ -20,12 +20,42 @@ spring:
         # Sobre la JVM sí se puede usar zstd; la restricción es de la imagen nativa.
         compression.type: zstd
 
+    # Trazas que cruzan Kafka. Ambas vienen desactivadas de fábrica en Spring Boot, y sin ellas
+    # la traza se corta al publicar: el productor cierra su span y el consumidor abre una traza
+    # nueva sin relación con la anterior. Con esto Spring Kafka inyecta el contexto en las
+    # cabeceras del mensaje y en Jaeger se ve el recorrido entero, desde el POST en la API hasta
+    # el listener que consume la decisión.
+    #
+    # Se activa sólo en local: cada mensaje paga la propagación de contexto en las cabeceras, y
+    # en el camino caliente de una autorización eso se decide con datos, no por defecto.
+    template:
+      observation-enabled: true
+    listener:
+      observation-enabled: true
+
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
 
 centinela:
+  seguridad:
+    rutas-publicas:
+      # Todo /actuator abierto, SOLO en local.
+      #
+      # Hace falta para que Prometheus pueda hacer scraping de /actuator/prometheus: el filtro
+      # de X-API-KEY sólo exime la sonda de salud, asi que sin esto el target sale 401 y el
+      # panel de Grafana se queda vacio sin explicacion aparente.
+      #
+      # De paso permite curiosear /actuator/metrics, /actuator/env y /actuator/configprops a
+      # mano, que es coherente con el exposure.include "*" de mas abajo.
+      #
+      # En produccion esto NO se toca: application.yml deja fuera todo salvo la sonda, y las
+      # metricas ahi las recogeria un agente dentro de la VPC, con credenciales. Una lista de
+      # un perfil REEMPLAZA a la del fichero base, no se fusiona con ella, por eso hay que
+      # repetir aqui las rutas de salud.
+      - /actuator/**
+
   aws:
     region: eu-west-1
     endpoint-override: ${AWS_ENDPOINT_OVERRIDE:http://localhost:4566}
@@ -57,7 +87,35 @@ management:
       show-details: always
   tracing:
     sampling:
+      # Todo se traza: en local el objetivo es ver el recorrido completo de una evaluacion,
+      # no proteger el flujo caliente.
       probability: 1.0
+    export:
+      otlp:
+        # Aqui SI hay colector: el Jaeger de docker-compose.
+        enabled: ${OTLP_TRAZAS_HABILITADO:true}
+
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          # Desde el host es localhost; desde la red de compose lo sobreescribe la variable
+          # de entorno del servicio (http://jaeger:4318/v1/traces).
+          endpoint: ${OTLP_TRAZAS_ENDPOINT:http://localhost:4318/v1/traces}
+        # Sin esperar a llenar el lote: en local interesa que la traza aparezca en Jaeger
+        # mientras todavia se esta mirando la peticion que la genero.
+        schedule-delay: 1s
+
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # Publica los buckets de http_server_requests_seconds, que es lo que necesita
+        # histogram_quantile() para los paneles de p50/p95/p99 del dashboard de Grafana.
+        #
+        # Solo aqui: cada bucket es una serie temporal mas por combinacion de etiquetas, y en
+        # produccion eso multiplica la cardinalidad y el coste de almacenamiento. Alli se
+        # activaria de forma selectiva y con SLOs acotados, no en abierto.
+        http.server.requests: true
 
 logging:
   level:

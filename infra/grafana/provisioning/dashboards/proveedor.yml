@@ -1,0 +1,30 @@
+# =================================================================================================
+# Carga los paneles de /var/lib/grafana/dashboards al arrancar. El JSON vive en el repositorio y
+# no en el volumen de Grafana: un panel que sólo existe dentro de un volumen de Docker se pierde
+# con el primer `docker compose down -v` y no se puede revisar en un diff.
+# =================================================================================================
+
+apiVersion: 1
+
+providers:
+  - name: centinela
+    orgId: 1
+    folder: Centinela
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    # false a propósito: el fichero del repositorio manda. Con true, Grafana se niega a pisar
+    # un panel que alguien haya tocado en la UI y el JSON versionado deja de ser la verdad.
+    allowUiUpdates: false
+    #
+    # COMPROBADO: en Docker Desktop (Windows) la recarga en caliente NO llega. Grafana vigila
+    # la fecha de modificación del fichero y el bind mount no la propaga al contenedor, así que
+    # updateIntervalSeconds no sirve de nada aquí por mucho que se baje. Tras editar el JSON:
+    #
+    #   docker compose --profile obs restart grafana
+    #
+    # El JSON tampoco lleva "version" fijada: con un número clavado, Grafana da el fichero por
+    # ya aplicado y se salta la reprovisión incluso al reiniciar.
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
