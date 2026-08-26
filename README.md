@@ -458,6 +458,27 @@ tarea que arranca**, y ampliarlo después es una operación de Kafka, no un `ter
 
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) — tests → imagen nativa → ECR → ECS.
 
+> ### Estado actual: despliegue apagado
+>
+> En cada push corren **sólo los tests**. Los jobs de imagen nativa y de ECS están detrás de la
+> variable de repositorio `DESPLIEGUE_HABILITADO` y aparecen como *Skipped*.
+>
+> No es una limitación del pipeline, que está completo: es que hasta que la infraestructura no
+> esté aplicada esos dos jobs **no pueden** pasar, porque suben a un ECR y actualizan un ECS que
+> todavía no existen. Con ellos activos, cada push dejaría un fallo rojo que no informa de nada.
+>
+> Para encenderlo, por este orden:
+>
+> | # | Qué | ¿Cuesta dinero? |
+> |---|---|---|
+> | 1 | Proveedor OIDC y rol de IAM con la condición `sub` acotada a este repositorio y a `main` | No |
+> | 2 | El ARN de ese rol en el secreto `ROL_DESPLIEGUE_AWS` | No |
+> | 3 | `terraform apply` — crea ECR, ECS y los otros 59 recursos | **Sí** |
+> | 4 | Certificado de ACM para el listener HTTPS (`var.arn_certificado` no tiene valor por defecto) | No |
+> | 5 | Variable `DESPLIEGUE_HABILITADO = true` en *Settings › Secrets and variables › Actions* | No |
+>
+> El rol del punto 1 todavía se crea a mano: es el punto 1 de [Pendiente](#pendiente).
+
 **Sin claves de acceso.** La autenticación es por OIDC: GitHub emite un token firmado, AWS lo
 valida y devuelve credenciales temporales. Sólo hace falta un secreto de repositorio,
 `ROL_DESPLIEGUE_AWS`, que es un ARN, no un secreto. Una clave estática en los secretos de un

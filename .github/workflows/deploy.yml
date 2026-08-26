@@ -87,6 +87,29 @@ jobs:
   construir:
     name: Imagen nativa
     needs: verificar
+    # -------------------------------------------------------------------------------------
+    # INTERRUPTOR DEL DESPLIEGUE.
+    #
+    # Este job y el siguiente sólo corren si la variable de repositorio
+    # DESPLIEGUE_HABILITADO vale 'true' (Settings > Secrets and variables > Actions >
+    # Variables). Mientras no exista, aparecen como "Skipped" en vez de en rojo.
+    #
+    # El motivo no es cosmético: hasta que la infraestructura esté aplicada, estos dos jobs
+    # NO PUEDEN pasar. 'construir' asume el rol por OIDC y sube a un repositorio de ECR que
+    # todavía no existe, y 'desplegar' actualiza un servicio de ECS que tampoco. Dejarlos
+    # fallando en cada push convierte el rojo en ruido de fondo, y el día que se rompa algo
+    # de verdad nadie lo va a mirar.
+    #
+    # Los tests SÍ corren siempre: son la barrera que importa mientras no haya despliegue.
+    #
+    # Para encenderlo hacen falta tres cosas, por este orden:
+    #   1. Proveedor OIDC y rol de IAM en AWS, con la condición 'sub' acotada a este
+    #      repositorio y a la rama main. Crearlos no cuesta dinero.
+    #   2. El ARN de ese rol en el secreto ROL_DESPLIEGUE_AWS.
+    #   3. `terraform apply`, para que existan ECR, ECS y el resto.
+    # Y entonces DESPLIEGUE_HABILITADO = true.
+    # -------------------------------------------------------------------------------------
+    if: vars.DESPLIEGUE_HABILITADO == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -183,6 +206,9 @@ jobs:
   desplegar:
     name: ECS
     needs: construir
+    # Redundante con el 'needs' —si 'construir' se salta, este también— pero se declara
+    # explícitamente para que quien lea el fichero no tenga que deducirlo.
+    if: vars.DESPLIEGUE_HABILITADO == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment:
