@@ -1,0 +1,27 @@
+# Hallazgos de Trivy revisados y aceptados. Cada uno lleva el motivo, el archivo al que aplica
+# y un vencimiento: al pasar la fecha la excepcion caduca y el CI vuelve a fallar hasta revisarla.
+# El analisis completo de riesgos esta en THREAT_MODEL.md.
+
+misconfigurations:
+  - id: AVD-AWS-0053
+    paths: ["modules/servicio/main.tf"]
+    statement: >-
+      El ALB es la entrada publica de la API: tiene que ser internet-facing. El security group
+      del balanceador solo admite los rangos de var.cidrs_permitidos y la API exige un JWT valido.
+    expired_at: 2027-04-30
+
+  - id: AVD-AWS-0104
+    paths: ["modules/red/main.tf"]
+    statement: >-
+      Salida abierta del security group de las tareas. DynamoDB y S3 ya salen por VPC endpoints
+      de tipo gateway y el resto de servicios de AWS por endpoints de interfaz. Restringir la
+      salida al CIDR de la VPC y a los prefix lists de esos endpoints esta pendiente (THREAT_MODEL.md, A-04).
+    expired_at: 2027-01-31
+
+  - id: AVD-AWS-0132
+    paths: ["bootstrap/main.tf"]
+    statement: >-
+      Bucket del estado de Terraform cifrado con SSE-S3, privado y con bloqueo de acceso publico.
+      Una CMK de KMS agrega costo y gestion de claves sin cambiar el modelo de amenazas de un
+      bucket al que solo accede el rol de despliegue.
+    expired_at: 2027-04-30
