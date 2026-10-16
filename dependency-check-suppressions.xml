@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Falsos positivos de OWASP Dependency-Check.
+  Cada supresion lleva el motivo y, si aplica, la fecha en que hay que revisarla (until).
+  Una supresion sin motivo es una vulnerabilidad escondida, no un falso positivo.
+-->
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+</suppressions>

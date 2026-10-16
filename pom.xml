@@ -28,6 +28,15 @@
     <maven.compiler.release>${java.version}</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
+    <!--
+      Parches de seguridad por encima del BOM de Spring Boot 4.1.1, detectados por Trivy en la
+      imagen. Retirar cada uno cuando una version de Spring Boot traiga una igual o superior.
+        tomcat:   CVE-2026-65182, CVE-2026-65905, CVE-2026-68525 (criticas)
+        jackson:  CVE-2026-89407, CVE-2026-89425, CVE-2026-68497, CVE-2026-91776, CVE-2026-91777
+    -->
+    <tomcat.version>11.0.27</tomcat.version>
+    <jackson-bom.version>3.1.7</jackson-bom.version>
+
     <!-- Versiones no gestionadas por el BOM de Spring Boot 4.1.1 -->
     <aws-sdk.version>2.54.2</aws-sdk.version>
     <mapstruct.version>1.6.3</mapstruct.version>
@@ -43,6 +52,12 @@
 
   <dependencyManagement>
     <dependencies>
+      <!-- Transitiva de kafka-clients. CVE-2026-106451 corregida en 1.11.4. -->
+      <dependency>
+        <groupId>at.yawk.lz4</groupId>
+        <artifactId>lz4-java</artifactId>
+        <version>1.11.4</version>
+      </dependency>
       <dependency>
         <groupId>software.amazon.awssdk</groupId>
         <artifactId>bom</artifactId>
@@ -297,6 +312,53 @@
   </build>
 
   <profiles>
+    <!--
+      Analisis de dependencias contra la base de vulnerabilidades del NVD (OWASP Dependency-Check).
+      Uso:  NVD_API_KEY=... ./mvnw -Pseguridad verify -DskipTests
+      Rompe el build si alguna dependencia tiene una vulnerabilidad con CVSS >= 7 (alta o critica).
+      Los falsos positivos se descartan en dependency-check-suppressions.xml, siempre con el motivo.
+    -->
+    <profile>
+      <id>seguridad</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.owasp</groupId>
+            <artifactId>dependency-check-maven</artifactId>
+            <version>13.0.0</version>
+            <configuration>
+              <!-- Sin clave el NVD limita tanto las consultas que la primera descarga tarda horas. -->
+              <nvdApiKeyEnvironmentVariable>NVD_API_KEY</nvdApiKeyEnvironmentVariable>
+              <failBuildOnCVSS>7</failBuildOnCVSS>
+              <formats>
+                <format>HTML</format>
+                <format>SARIF</format>
+              </formats>
+              <suppressionFiles>
+                <suppressionFile>${project.basedir}/dependency-check-suppressions.xml</suppressionFile>
+              </suppressionFiles>
+              <!-- Solo dependencias que viajan en el artefacto: las de test no llegan a produccion. -->
+              <skipTestScope>true</skipTestScope>
+              <!-- OSS Index exige credenciales desde 2025; el NVD alcanza para Maven. -->
+              <ossindexAnalyzerEnabled>false</ossindexAnalyzerEnabled>
+              <!-- Proyecto Java puro: no hay JavaScript, .NET ni Node que analizar. -->
+              <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>
+              <nodeAnalyzerEnabled>false</nodeAnalyzerEnabled>
+              <nodeAuditAnalyzerEnabled>false</nodeAuditAnalyzerEnabled>
+              <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
+            </configuration>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
     <!--
       Complementa el perfil 'native' que ya define spring-boot-starter-parent.
       Uso:  ./mvnw -Pnative native:compile
