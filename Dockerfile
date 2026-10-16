@@ -134,7 +134,7 @@ RUN --mount=type=cache,target=/root/.m2,sharing=locked \
     java -Djarmode=tools -jar target/centinela-*.jar extract --layers --launcher --destination extraido
 
 
-FROM gcr.io/distroless/java25-debian12:nonroot AS jvm
+FROM gcr.io/distroless/java25-debian13:nonroot AS jvm
 
 COPY --from=sistema /identidad-passwd /etc/passwd
 COPY --from=sistema /identidad-group /etc/group
