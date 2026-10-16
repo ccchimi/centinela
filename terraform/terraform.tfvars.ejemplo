@@ -16,8 +16,8 @@ entorno = "prod"
 # -------------------------------------------------------------------------------------------------
 # OBLIGATORIA. Certificado de ACM para el listener HTTPS.
 #
-# No tiene valor por defecto a propósito: sin TLS, la clave de la cabecera X-API-KEY viajaría en
-# claro y cualquiera en el camino podría reutilizarla.
+# No tiene valor por defecto a propósito: sin TLS, el token de acceso viajaría en claro y
+# cualquiera en el camino podría reutilizarlo hasta que venza.
 #
 # Tiene que estar en la MISMA región que el balanceador, y en estado ISSUED. Un certificado en
 # PENDING_VALIDATION deja el listener creado pero sin servir tráfico.
@@ -80,3 +80,12 @@ particiones_por_topic = 6
 # -------------------------------------------------------------------------------------------------
 
 retencion_logs_dias = 30
+
+# -------------------------------------------------------------------------------------------------
+# OBLIGATORIA. Emisor de los tokens (OIDC). Tiene que ser HTTPS.
+#
+# Con Keycloak es la URL del realm. Las claves públicas se derivan de aquí salvo que se indique
+# oidc_jwk_set_uri, y la audiencia por defecto es 'centinela-api'.
+# -------------------------------------------------------------------------------------------------
+
+oidc_issuer_uri = "https://auth.tudominio.com/realms/centinela"

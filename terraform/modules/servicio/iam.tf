@@ -52,7 +52,10 @@ resource "aws_iam_role_policy_attachment" "ejecucion_gestionada" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# Sólo existe si hay secretos que leer: una política con la lista de recursos vacía es inválida.
 data "aws_iam_policy_document" "leer_secretos" {
+  count = length(var.arns_secretos) > 0 ? 1 : 0
+
   statement {
     sid       = "ResolverSecretosDelTaskDefinition"
     actions   = ["secretsmanager:GetSecretValue"]
@@ -61,9 +64,11 @@ data "aws_iam_policy_document" "leer_secretos" {
 }
 
 resource "aws_iam_role_policy" "ejecucion_secretos" {
+  count = length(var.arns_secretos) > 0 ? 1 : 0
+
   name   = "${local.prefijo}-secretos"
   role   = aws_iam_role.ejecucion.id
-  policy = data.aws_iam_policy_document.leer_secretos.json
+  policy = data.aws_iam_policy_document.leer_secretos[0].json
 }
 
 # -------------------------------------------------------------------------------------------------

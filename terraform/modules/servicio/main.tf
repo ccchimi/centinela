@@ -86,13 +86,11 @@ resource "aws_ecs_task_definition" "esta" {
         { name = "REDIS_SSL_ENABLED", value = "true" },
 
         { name = "POLITICA_VERSION", value = var.version_politica },
-      ]
 
-      secrets = [
-        {
-          name      = "API_KEY"
-          valueFrom = var.arn_secreto_api_key
-        },
+        # Autenticación: datos públicos del emisor. No hay secretos que inyectar.
+        { name = "OIDC_ISSUER_URI", value = var.oidc_issuer_uri },
+        { name = "OIDC_JWK_SET_URI", value = var.oidc_jwk_set_uri },
+        { name = "OIDC_AUDIENCIA", value = var.oidc_audiencia },
       ]
 
       logConfiguration = {

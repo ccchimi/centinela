@@ -6,8 +6,10 @@ misconfigurations:
   - id: AVD-AWS-0053
     paths: ["modules/servicio/main.tf"]
     statement: >-
-      El ALB es la entrada publica de la API: tiene que ser internet-facing. El security group
-      del balanceador solo admite los rangos de var.cidrs_permitidos y la API exige un JWT valido.
+      El ALB es la entrada de la API: tiene que ser internet-facing para el autorizador. Toda
+      peticion exige un JWT valido (firma, emisor, audiencia y rol). El security group admite
+      var.cidrs_permitidos, que por defecto es 0.0.0.0/0: acotarlo antes de exponer el servicio
+      es parte del despliegue (THREAT_MODEL.md, A-03).
     expired_at: 2027-04-30
 
   - id: AVD-AWS-0104

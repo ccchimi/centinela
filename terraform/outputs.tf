@@ -29,10 +29,6 @@ output "tablas_dynamodb" {
   }
 }
 
-output "secreto_api_key" {
-  description = "Poner el valor con `aws secretsmanager put-secret-value`; Terraform solo crea el contenedor."
-  value       = aws_secretsmanager_secret.api_key.arn
-}
 
 output "grupo_de_logs" {
   value = module.servicio.grupo_de_logs

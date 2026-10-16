@@ -22,18 +22,28 @@ variable "particiones_por_topic" { type = number }
 variable "endpoint_cache" { type = string }
 variable "puerto_cache" { type = number }
 
-variable "arn_secreto_api_key" {
-  description = "ARN del secreto con la clave de la API. ECS lo resuelve al arrancar; no viaja en el task definition."
+variable "oidc_issuer_uri" {
+  description = "Emisor de los tokens que acepta la API."
+  type        = string
+}
+
+variable "oidc_jwk_set_uri" {
+  description = "URL de las claves públicas del emisor."
+  type        = string
+}
+
+variable "oidc_audiencia" {
+  description = "Audiencia que deben traer los tokens."
   type        = string
 }
 
 variable "arns_secretos" {
-  description = "Todos los secretos que el rol de ejecución puede leer."
+  description = "Secretos que el rol de ejecución puede leer. Hoy ninguno: la autenticación OIDC no necesita secretos en la app."
   type        = list(string)
 }
 
 variable "arn_certificado" {
-  description = "Certificado de ACM para el listener HTTPS. Sin él no hay TLS y la clave de API viajaría en claro."
+  description = "Certificado de ACM para el listener HTTPS. Sin él no hay TLS y los tokens de acceso viajarían en claro."
   type        = string
 }
 

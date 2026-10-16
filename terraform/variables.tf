@@ -104,9 +104,38 @@ variable "cidrs_permitidos" {
 
 variable "arn_certificado" {
   description = <<-EOT
-    Certificado de ACM para el listener HTTPS. Sin TLS, la clave de la cabecera X-API-KEY
-    viajaria en claro y cualquiera en el camino podria reutilizarla. No tiene valor por defecto
+    Certificado de ACM para el listener HTTPS. Sin TLS, el token de acceso de la cabecera
+    Authorization viajaria en claro y cualquiera en el camino podria reutilizarlo hasta que venza. No tiene valor por defecto
     a proposito: obliga a resolverlo antes del primer apply.
   EOT
   type        = string
+}
+
+# -------------------------------------------------------------------------------------------------
+# Autenticación (OIDC)
+# -------------------------------------------------------------------------------------------------
+
+variable "oidc_issuer_uri" {
+  description = <<-EOT
+    Emisor de los tokens que acepta la API (claim 'iss'), por ejemplo
+    https://auth.tudominio.com/realms/centinela. Sin valor por defecto: la app no arranca sin él.
+  EOT
+  type        = string
+
+  validation {
+    condition     = startswith(var.oidc_issuer_uri, "https://")
+    error_message = "El emisor tiene que ser HTTPS: sus claves públicas son las que deciden qué token es válido."
+  }
+}
+
+variable "oidc_jwk_set_uri" {
+  description = "Claves públicas del emisor (JWKS). Si se deja en null se deriva del emisor con la ruta de Keycloak."
+  type        = string
+  default     = null
+}
+
+variable "oidc_audiencia" {
+  description = "Audiencia ('aud') que deben traer los tokens. Evita aceptar tokens emitidos para otro servicio."
+  type        = string
+  default     = "centinela-api"
 }

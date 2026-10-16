@@ -15,7 +15,7 @@ module "red" {
   zonas    = var.zonas_de_disponibilidad
 
   # Acotar esto a los rangos del autorizador y de la red corporativa antes de exponer nada.
-  # La clave de API es la segunda barrera, no la primera.
+  # El token de acceso es la segunda barrera, no la primera.
   cidrs_permitidos = var.cidrs_permitidos
 }
 
@@ -45,29 +45,13 @@ module "mensajeria" {
 }
 
 # -------------------------------------------------------------------------------------------------
-# Secreto de la clave de API.
+# Autenticación de la API: JWT de un proveedor OIDC.
 #
-# Terraform crea el CONTENEDOR del secreto, no su valor. Si el valor se generara aquí acabaría
-# en el estado de Terraform en claro, que es un fichero que la gente copia, comparte y a veces
-# sube a un bucket mal configurado.
-#
-# El valor se pone una vez, fuera de Terraform:
-#
-#   aws secretsmanager put-secret-value \
-#     --secret-id centinela-prod-api-key \
-#     --secret-string "$(openssl rand -base64 32)" \
-#     --region us-east-1
-#
-# El ciclo de vida ignora la versión para que un `apply` posterior no la pise.
+# A diferencia de la antigua clave de API, aquí no hay ningún secreto que guardar: la app sólo
+# necesita saber quién emite los tokens (issuer), de dónde bajar sus claves PÚBLICAS (JWKS) y qué
+# audiencia exigir. Los secretos son de cada cliente (el autorizador, la herramienta de analistas)
+# y viven en el proveedor de identidad, no en esta infraestructura.
 # -------------------------------------------------------------------------------------------------
-
-resource "aws_secretsmanager_secret" "api_key" {
-  name        = "${var.nombre}-${var.entorno}-api-key"
-  description = "Clave de la cabecera X-API-KEY de la API de Centinela"
-
-  # Margen para revertir un borrado accidental: sin clave, el servicio no arranca.
-  recovery_window_in_days = 7
-}
 
 module "servicio" {
   source = "./modules/servicio"
@@ -96,9 +80,11 @@ module "servicio" {
   endpoint_cache = module.datos.endpoint_cache
   puerto_cache   = module.datos.puerto_cache
 
-  arn_secreto_api_key = aws_secretsmanager_secret.api_key.arn
-  arns_secretos       = [aws_secretsmanager_secret.api_key.arn]
-  arn_certificado     = var.arn_certificado
+  oidc_issuer_uri  = var.oidc_issuer_uri
+  oidc_jwk_set_uri = coalesce(var.oidc_jwk_set_uri, "${var.oidc_issuer_uri}/protocol/openid-connect/certs")
+  oidc_audiencia   = var.oidc_audiencia
+  arns_secretos    = []
+  arn_certificado  = var.arn_certificado
 
   cpu_tarea           = var.cpu_tarea
   memoria_tarea       = var.memoria_tarea
