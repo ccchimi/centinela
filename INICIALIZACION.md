@@ -85,11 +85,28 @@ curl.exe -s http://localhost:8080/actuator/health
 
 ## 4. Primera petición
 
-La API exige la cabecera `X-API-KEY`. En local la clave por defecto es
-`clave-de-desarrollo-no-usar-en-produccion`, y el arranque avisa a gritos de que se está usando.
+La API exige un **token de acceso** en la cabecera `Authorization: Bearer`. Lo emite el Keycloak
+del `docker compose` (puerto 8180), que ya viene con el realm `centinela` y dos clientes:
+
+| Cliente | Rol | Puede |
+|---|---|---|
+| `autorizador` | `evaluador` | evaluar transacciones y consultar decisiones |
+| `herramienta-analistas` | `analista` | consultar decisiones y perfiles |
+
+Pedí un token por cada uno. **Vencen a los 5 minutos**: si una petición empieza a dar `401`,
+volvé a correr estas dos líneas.
 
 ```bash
-curl.exe -s -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "X-API-KEY: clave-de-desarrollo-no-usar-en-produccion" -d '{"idTransaccion":"tx-1","idCliente":"cli-demo","importe":120.00,"moneda":"EUR","instrumento":{"tipo":"TARJETA","bin":"454213","ultimosCuatro":"1881","marca":"VISA","presente":false},"comercio":{"id":"com-100","nombre":"Libreria","mcc":"5942","pais":"ES"},"canal":"WEB","origen":{"latitud":40.4168,"longitud":-3.7038,"pais":"ES"},"idDispositivo":"disp-1","ocurridaEn":"2026-08-24T12:00:00Z"}'
+EVALUADOR=$(curl.exe -s -X POST http://localhost:8180/realms/centinela/protocol/openid-connect/token -d grant_type=client_credentials -d client_id=autorizador -d client_secret=secreto-autorizador-SOLO-DESARROLLO | sed -E 's/.*"access_token":"([^"]+)".*//')
+ANALISTA=$(curl.exe -s -X POST http://localhost:8180/realms/centinela/protocol/openid-connect/token -d grant_type=client_credentials -d client_id=herramienta-analistas -d client_secret=secreto-analistas-SOLO-DESARROLLO | sed -E 's/.*"access_token":"([^"]+)".*//')
+```
+
+Los secretos de los clientes son **sólo de desarrollo** y están en el repositorio a propósito
+(`infra/keycloak/centinela-realm.json`). La consola de Keycloak está en
+<http://localhost:8180> con `admin` / `admin`.
+
+```bash
+curl.exe -s -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "Authorization: Bearer $EVALUADOR" -d '{"idTransaccion":"tx-1","idCliente":"cli-demo","importe":120.00,"moneda":"EUR","instrumento":{"tipo":"TARJETA","bin":"454213","ultimosCuatro":"1881","marca":"VISA","presente":false},"comercio":{"id":"com-100","nombre":"Libreria","mcc":"5942","pais":"ES"},"canal":"WEB","origen":{"latitud":40.4168,"longitud":-3.7038,"pais":"ES"},"idDispositivo":"disp-1","ocurridaEn":"2026-08-24T12:00:00Z"}'
 ```
 
 ```json
@@ -122,13 +139,13 @@ Para ver el motor trabajando de verdad hace falta que el perfil del cliente teng
 Seis operaciones normales:
 
 ```bash
-for i in 0 1 2 3 4 5; do curl.exe -s -o /dev/null -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "X-API-KEY: clave-de-desarrollo-no-usar-en-produccion" -d "{\"idTransaccion\":\"n-$i\",\"idCliente\":\"cli-demo\",\"importe\":$((95+i*7)).00,\"moneda\":\"EUR\",\"instrumento\":{\"tipo\":\"TARJETA\",\"bin\":\"454213\",\"ultimosCuatro\":\"1881\",\"marca\":\"VISA\",\"presente\":false},\"comercio\":{\"id\":\"com-100\",\"nombre\":\"Libreria\",\"mcc\":\"5942\",\"pais\":\"ES\"},\"canal\":\"WEB\",\"origen\":{\"latitud\":40.4168,\"longitud\":-3.7038,\"pais\":\"ES\"},\"idDispositivo\":\"disp-1\",\"ocurridaEn\":\"2026-08-24T1$i:00:00Z\"}"; done
+for i in 0 1 2 3 4 5; do curl.exe -s -o /dev/null -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "Authorization: Bearer $EVALUADOR" -d "{\"idTransaccion\":\"n-$i\",\"idCliente\":\"cli-demo\",\"importe\":$((95+i*7)).00,\"moneda\":\"EUR\",\"instrumento\":{\"tipo\":\"TARJETA\",\"bin\":\"454213\",\"ultimosCuatro\":\"1881\",\"marca\":\"VISA\",\"presente\":false},\"comercio\":{\"id\":\"com-100\",\"nombre\":\"Libreria\",\"mcc\":\"5942\",\"pais\":\"ES\"},\"canal\":\"WEB\",\"origen\":{\"latitud\":40.4168,\"longitud\":-3.7038,\"pais\":\"ES\"},\"idDispositivo\":\"disp-1\",\"ocurridaEn\":\"2026-08-24T1$i:00:00Z\"}"; done
 ```
 
 El perfil que ha aprendido:
 
 ```bash
-curl.exe -s http://localhost:8080/api/v1/perfiles/cli-demo -H "X-API-KEY: clave-de-desarrollo-no-usar-en-produccion"
+curl.exe -s http://localhost:8080/api/v1/perfiles/cli-demo -H "Authorization: Bearer $ANALISTA"
 ```
 
 ```json
@@ -150,7 +167,7 @@ claro ni siquiera por la API interna.
 las pocas horas de haber operado en Madrid.
 
 ```bash
-curl.exe -s -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "X-API-KEY: clave-de-desarrollo-no-usar-en-produccion" -d '{"idTransaccion":"anomala","idCliente":"cli-demo","importe":5000.00,"moneda":"EUR","instrumento":{"tipo":"TARJETA","bin":"454213","ultimosCuatro":"1881","marca":"VISA","presente":false},"comercio":{"id":"com-999","nombre":"Joyeria","mcc":"5944","pais":"RU"},"canal":"WEB","origen":{"latitud":55.7558,"longitud":37.6173,"pais":"RU"},"idDispositivo":"disp-desconocido","ocurridaEn":"2026-08-24T16:00:00Z"}'
+curl.exe -s -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "Authorization: Bearer $EVALUADOR" -d '{"idTransaccion":"anomala","idCliente":"cli-demo","importe":5000.00,"moneda":"EUR","instrumento":{"tipo":"TARJETA","bin":"454213","ultimosCuatro":"1881","marca":"VISA","presente":false},"comercio":{"id":"com-999","nombre":"Joyeria","mcc":"5944","pais":"RU"},"canal":"WEB","origen":{"latitud":55.7558,"longitud":37.6173,"pais":"RU"},"idDispositivo":"disp-desconocido","ocurridaEn":"2026-08-24T16:00:00Z"}'
 ```
 
 ```json
@@ -175,7 +192,7 @@ decide `DESAFIAR`. La señal viene con la evidencia que la sostiene, no sólo co
 Y para recuperar una decisión ya emitida:
 
 ```bash
-curl.exe -s http://localhost:8080/api/v1/evaluaciones/anomala -H "X-API-KEY: clave-de-desarrollo-no-usar-en-produccion"
+curl.exe -s http://localhost:8080/api/v1/evaluaciones/anomala -H "Authorization: Bearer $EVALUADOR"
 ```
 
 ## 6. La otra puerta: Kafka
@@ -230,7 +247,7 @@ modelo que se usaría en producción, así que lo que se ve aquí es representat
 Para que los gráficos tengan forma, genera algo de carga:
 
 ```bash
-for i in $(seq 1 60); do curl.exe -s -o /dev/null -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "X-API-KEY: clave-de-desarrollo-no-usar-en-produccion" -d "{\"idTransaccion\":\"carga-$i\",\"idCliente\":\"cli-$((i%7))\",\"importe\":$((30+i*13)).00,\"moneda\":\"EUR\",\"instrumento\":{\"tipo\":\"TARJETA\",\"bin\":\"454213\",\"ultimosCuatro\":\"1881\",\"marca\":\"VISA\",\"presente\":false},\"comercio\":{\"id\":\"com-100\",\"nombre\":\"Libreria\",\"mcc\":\"5942\",\"pais\":\"ES\"},\"canal\":\"WEB\",\"origen\":{\"latitud\":40.4168,\"longitud\":-3.7038,\"pais\":\"ES\"},\"idDispositivo\":\"disp-1\",\"ocurridaEn\":\"2026-08-24T12:00:00Z\"}"; done
+for i in $(seq 1 60); do curl.exe -s -o /dev/null -X POST http://localhost:8080/api/v1/evaluaciones -H "Content-Type: application/json" -H "Authorization: Bearer $EVALUADOR" -d "{\"idTransaccion\":\"carga-$i\",\"idCliente\":\"cli-$((i%7))\",\"importe\":$((30+i*13)).00,\"moneda\":\"EUR\",\"instrumento\":{\"tipo\":\"TARJETA\",\"bin\":\"454213\",\"ultimosCuatro\":\"1881\",\"marca\":\"VISA\",\"presente\":false},\"comercio\":{\"id\":\"com-100\",\"nombre\":\"Libreria\",\"mcc\":\"5942\",\"pais\":\"ES\"},\"canal\":\"WEB\",\"origen\":{\"latitud\":40.4168,\"longitud\":-3.7038,\"pais\":\"ES\"},\"idDispositivo\":\"disp-1\",\"ocurridaEn\":\"2026-08-24T12:00:00Z\"}"; done
 ```
 
 > El panel de percentiles necesita los *buckets* del histograma, que sólo se publican en el
@@ -387,7 +404,8 @@ Tarda unos 2 minutos, más que en local, porque arranca el contenedor cada vez.
 | `docker exec centinela-app sh` da "not found" | La imagen distroless no tiene shell. Es intencionado. Usa `docker logs centinela-app` |
 | El target `centinela` sale caído en Prometheus | La aplicación todavía está arrancando. Espera unos segundos tras `up -d` |
 | Editas un panel de Grafana y no se refleja | La recarga en caliente no llega a través del bind mount en Docker Desktop: Grafana vigila la fecha de modificación y el montaje no la propaga. `docker compose --profile obs restart grafana` |
-| `401 No autorizado` en la API | Falta la cabecera `X-API-KEY` o su valor no es el correcto |
+| `401 No autorizado` en la API | Falta el token o venció (duran 5 minutos). Volvé a pedirlo como en el [paso 4](#4-primera-petición) |
+| `403 Acceso denegado` en la API | El token es válido pero del cliente equivocado: los perfiles los lee `herramienta-analistas`, no `autorizador` |
 | `docker exec centinela-kafka kafka-topics.sh` da "not found" | `apache/kafka-native` no trae los scripts. Usa un contenedor `apache/kafka:3.9.1` como en el [paso 6](#6-la-otra-puerta-kafka) |
 | Las evaluaciones salen siempre `degradada: true` | El perfil del cliente aún no tiene historial. Es correcto: ver el [paso 5](#5-hacer-que-el-motor-decida) |
 | `./mvnw test` falla con *"Se requiere JDK 25 o superior"* | Tenés un JDK anterior. Es el `maven-enforcer-plugin` cortando antes de compilar. Ver [Tests](#tests) |

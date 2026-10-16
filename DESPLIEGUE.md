@@ -26,7 +26,7 @@ Runbook de la rama `centinela-aws-deploy`. Deja el proyecto en el punto exacto e
 | 3 | `terraform.tfvars` | Plantilla completa y documentada | Gratis |
 | 4 | Bucket del estado remoto | **En código.** `terraform/bootstrap/` | Céntimos |
 | 5 | **`terraform apply` del stack principal** | Esperando presupuesto | **~950 USD/mes** |
-| 6 | Valor del secreto de la API | Bloqueado por el 5 | Gratis |
+| 6 | Emisor OIDC (`oidc_issuer_uri`) | Pendiente: **necesita un Keycloak u otro proveedor OIDC con HTTPS** | Depende del proveedor |
 | 7 | Secreto `ROL_DESPLIEGUE_AWS` | Listo tras el 1 | Gratis |
 | 8 | Variable `DESPLIEGUE_HABILITADO` | Último interruptor | Gratis |
 
@@ -152,11 +152,13 @@ en `PENDING_VALIDATION` deja el listener creado pero sin servir tráfico.
 cd terraform && cp terraform.tfvars.ejemplo terraform.tfvars
 ```
 
-Edita `terraform.tfvars`. Dos valores importan de verdad:
+Edita `terraform.tfvars`. Tres valores importan de verdad:
 
-- **`arn_certificado`** — el del paso anterior. Es la única variable sin valor por defecto.
+- **`arn_certificado`** — el del paso anterior. Sin valor por defecto.
+- **`oidc_issuer_uri`** — el emisor de los tokens (ver el paso 6). Sin valor por defecto y tiene
+  que ser HTTPS: la validación de Terraform corta el `plan` si no lo es.
 - **`cidrs_permitidos`** — hoy el default es `0.0.0.0/0`, que expone la API a todo internet con
-  la clave compartida como única barrera. Acótalo a los rangos del autorizador.
+  el token como única barrera. Acótalo a los rangos del autorizador.
 
 `terraform.tfvars` está en `.gitignore` y no debe subirse.
 
@@ -184,18 +186,20 @@ terraform apply prod.tfplan
 
 Tarda entre 20 y 40 minutos: MSK Serverless y ElastiCache son los lentos.
 
-### 6. El valor del secreto — *gratis*
+### 6. El proveedor de identidad
 
-Terraform crea el **contenedor** del secreto, nunca su valor: si se generara en Terraform
-acabaría en el fichero de estado en claro, que es un fichero que la gente copia, comparte y a
-veces sube a un bucket mal configurado.
+La API valida JWT, así que necesita un emisor OIDC alcanzable por HTTPS desde las tareas (para
+descargar sus claves públicas). Con Keycloak:
 
-```bash
-aws secretsmanager put-secret-value --secret-id centinela-prod-api-key --secret-string "$(openssl rand -base64 32)" --region us-east-1
-```
+1. Importar [`infra/keycloak/centinela-realm.json`](infra/keycloak/centinela-realm.json) como
+   punto de partida y **regenerar los secretos de los clientes**: los del fichero son de
+   desarrollo y públicos.
+2. Entregar a cada consumidor su `client_id` y su secreto por un canal seguro. El autorizador
+   recibe el rol `evaluador`; la herramienta de analistas, `analista`.
+3. Poner la URL del realm en `oidc_issuer_uri`.
 
-Sin este paso el servicio no arranca: en `prod` la propiedad no tiene valor por defecto, así que
-un despliegue sin `API_KEY` falla al iniciar en vez de quedarse abierto.
+La app no guarda ningún secreto: emisor, claves públicas y audiencia son datos públicos. Si falta
+`OIDC_ISSUER_URI` la aplicación no arranca, en lugar de quedarse aceptando cualquier cosa.
 
 ### 7. El secreto del repositorio — *gratis*
 
@@ -266,6 +270,7 @@ cambios en la aplicación**.
 | El job de imagen nativa falla en `configure-aws-credentials` a los pocos segundos | Falta el secreto `ROL_DESPLIEGUE_AWS`, y GitHub lo resuelve como cadena vacía |
 | Los jobs de despliegue aparecen como `Skipped` | Falta la variable `DESPLIEGUE_HABILITADO = true`. Es el comportamiento por defecto y es intencionado |
 | Las tareas se quedan en `PENDING` y mueren al extraer la imagen | Falta el gateway endpoint de S3 o la salida a internet. ECR guarda las capas en S3 |
-| El servicio recicla tareas en bucle | Falta el valor del secreto de la API: el contenedor no arranca y el health check nunca pasa |
+| El servicio recicla tareas en bucle | Falta `OIDC_ISSUER_URI` y el contenedor no arranca, así que el health check nunca pasa |
+| La API responde `401` a tokens recién emitidos | El `iss` del token no coincide con `oidc_issuer_uri` (ojo con la barra final y http/https) o falta la audiencia `centinela-api` en el cliente |
 | `terraform apply` pide `arn_certificado` por consola | No existe `terraform.tfvars`, o no tiene esa variable. No tiene valor por defecto a propósito |
 | `EntityAlreadyExists` al aplicar el bootstrap | Se perdió su `terraform.tfstate` local. Hay que importar los recursos con `terraform import` |

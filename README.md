@@ -1,5 +1,7 @@
 # Centinela
 
+[![Seguridad](https://github.com/ccchimi/centinela/actions/workflows/seguridad.yml/badge.svg)](https://github.com/ccchimi/centinela/actions/workflows/seguridad.yml)
+
 Motor de detección de fraude transaccional en tiempo real. Consume autorizaciones de Kafka,
 las evalúa dentro del presupuesto de latencia de la autorización y emite un veredicto con la
 evidencia que lo sostiene.
@@ -8,9 +10,11 @@ evidencia que lo sostiene.
 > máquina está en **[INICIALIZACION.md](INICIALIZACION.md)**: un solo comando, una petición de
 > prueba y las URLs de Grafana y Jaeger para ver el flujo de datos.
 
-**Estado:** iteración 6 — API autenticada, infraestructura como código y pipeline de despliegue. Imagen nativa con GraalVM sobre distroless,
-ecosistema completo en `docker compose`, configuración 12-Factor por perfiles. 163 tests
-unitarios (sin contenedores, ~7 s) + 26 de integración contra Kafka, LocalStack y Redis reales.
+**Estado:** iteración 7 — API con OAuth2 (JWT de Keycloak), análisis de seguridad en CI y
+[modelo de amenazas](THREAT_MODEL.md). Infraestructura como código, pipeline de despliegue,
+imagen nativa con GraalVM sobre distroless, ecosistema completo en `docker compose` y
+configuración 12-Factor por perfiles. 184 tests unitarios (sin contenedores) + 32 de integración
+contra Kafka, LocalStack, Redis y Keycloak reales.
 
 ---
 
@@ -22,7 +26,9 @@ unitarios (sin contenedores, ~7 s) + 26 de integración contra Kafka, LocalStack
 | Spring Boot | 4.1.1 | Spring Framework 7.0.9, Jackson 3.1.5 |
 | Spring Kafka | 4.1.1 | kafka-clients 4.2.1 |
 | AWS SDK for Java | 2.54.2 | `DynamoDbAsyncClient` sobre Netty |
-| Testcontainers | 2.0.5 | Kafka + LocalStack + Redis |
+| Spring Security | 7.x (BOM de Boot) | OAuth2 Resource Server: JWT firmados por el emisor OIDC |
+| Keycloak | `quay.io/keycloak/keycloak:26.8.1` | proveedor OIDC en local y en los tests; realm en `infra/keycloak` |
+| Testcontainers | 2.0.5 | Kafka + LocalStack + Redis + Keycloak |
 | MapStruct | 1.6.3 | GA; 1.7.0 sigue en beta |
 | ArchUnit | 1.5.0 | reglas del hexágono como test |
 | GraalVM Native Build Tools | 1.1.8 | gestionado por el parent de Spring Boot |
@@ -42,8 +48,8 @@ Todas las versiones se comprobaron contra Maven Central el 2026-08-24 y son las 
 ## Arranque rápido
 
 ```bash
-./mvnw test      # 163 unitarios, sin Docker, ~7 s
-./mvnw verify    # + 26 de integración con contenedores reales, ~45 s
+./mvnw test      # 184 unitarios, sin Docker
+./mvnw verify    # + 32 de integración con contenedores reales (Keycloak suma ~30 s de arranque)
 ```
 
 API REST (además del consumo por Kafka):
@@ -54,11 +60,15 @@ GET  /api/v1/evaluaciones/{idTx}       rastro de auditoría de una decisión
 GET  /api/v1/perfiles/{idCliente}      perfil de comportamiento (sólo lectura)
 ```
 
-Todas las rutas exigen la cabecera `X-API-KEY`, **salvo `/actuator/health`**, que queda abierta
-porque el balanceador la consulta sin credenciales.
+Todas las rutas exigen un **token de acceso JWT** en `Authorization: Bearer`, **salvo
+`/actuator/health`**, que queda abierta porque el balanceador la consulta sin credenciales. Cada
+operación pide un rol: `evaluador` para evaluar (el autorizador), `analista` para leer perfiles
+(la herramienta de analistas); las decisiones las pueden consultar los dos. Cualquier otra ruta se
+deniega. Detalle en [Seguridad](#seguridad).
 
 ```bash
-curl -H "X-API-KEY: $API_KEY" localhost:8080/api/v1/perfiles/cli-1
+TOKEN=$(curl -s -X POST localhost:8180/realms/centinela/protocol/openid-connect/token   -d grant_type=client_credentials -d client_id=herramienta-analistas   -d client_secret=secreto-analistas-SOLO-DESARROLLO | sed -E 's/.*"access_token":"([^"]+)".*//')
+curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/v1/perfiles/cli-1
 ```
 
 Los errores salen como Problem Details (RFC 9457) con un `codigo` estable pensado para
@@ -88,6 +98,30 @@ el SDK usa su cadena por defecto, que en AWS resuelve al rol de la tarea (IRSA e
 en ECS) y rota solo. `AWS_ACCESS_KEY_ID` en el entorno de un despliegue real es un hallazgo de
 auditoría, no una configuración; en `docker compose` sí aparece, porque LocalStack exige
 credenciales y acepta cualquiera.
+
+---
+
+## Seguridad
+
+El análisis completo —activos, fronteras de confianza, amenazas STRIDE con su mitigación y los
+riesgos que quedan abiertos— está en **[THREAT_MODEL.md](THREAT_MODEL.md)**. En resumen:
+
+- **Autenticación: OAuth2 Resource Server.** Cada consumidor tiene su identidad en Keycloak y
+  pide un token por client credentials. La API verifica la firma contra las claves públicas del
+  emisor, el vencimiento (5 minutos), el emisor (`iss`) y la **audiencia** (`aud` =
+  `centinela-api`): un token válido del mismo realm emitido para otro servicio no entra, y hay
+  un test de integración contra Keycloak real que lo demuestra.
+- **Autorización por rol y denegación por defecto.** El autorizador no puede leer perfiles de
+  comportamiento —el dato más sensible que expone la API— porque no los necesita. Un endpoint
+  nuevo nace cerrado: `anyRequest().denyAll()`.
+- **401 y 403 en Problem Details**, con `WWW-Authenticate` según RFC 6750 y sin detallar en el
+  cuerpo por qué se rechazó un token.
+- **CI de seguridad** ([`seguridad.yml`](.github/workflows/seguridad.yml)): OWASP Dependency-Check
+  sobre las dependencias, CodeQL sobre el código, Trivy sobre la imagen y sobre el Terraform.
+  Corre en cada push y cada lunes, y publica todo en *Security → Code scanning*. Las excepciones
+  aceptadas viven en [`.trivyignore.yaml`](.trivyignore.yaml) y
+  [`dependency-check-suppressions.xml`](dependency-check-suppressions.xml), siempre con motivo y
+  fecha de vencimiento.
 
 ---
 
@@ -435,15 +469,12 @@ Ambos validados con `terraform validate` y `terraform fmt` contra el provider AW
 ### Antes del primer `apply`
 
 1. **Certificado de ACM** en la misma región (`var.arn_certificado`, sin valor por defecto: el
-   `plan` falla si falta). Sin TLS, la clave de la cabecera viajaría en claro.
-2. **Acotar `cidrs_permitidos`** a los rangos del autorizador y de la red corporativa. La clave
-   de API es la segunda barrera, no la primera.
-3. **Poner el valor del secreto.** Terraform crea el *contenedor* del secreto, no su valor: si
-   lo generara, acabaría en el estado de Terraform en claro.
-
-```bash
-aws secretsmanager put-secret-value --secret-id centinela-prod-api-key --secret-string "$(openssl rand -base64 32)" --region us-east-1
-```
+   `plan` falla si falta). Sin TLS, el token de acceso viajaría en claro.
+2. **Acotar `cidrs_permitidos`** a los rangos del autorizador y de la red corporativa. El token
+   es la segunda barrera, no la primera.
+3. **Emisor OIDC** (`var.oidc_issuer_uri`, obligatorio y HTTPS): el realm de Keycloak, u otro
+   proveedor OIDC, que emite los tokens. La app no necesita ningún secreto: sólo el emisor, sus
+   claves públicas y la audiencia.
 
 ### Por qué MSK Serverless
 
@@ -737,6 +768,9 @@ comprueba `runAsNonRoot` en Kubernetes sin resolver nombres.
 
 ### ADR-0019 — Clave de API compartida, no un servidor de identidades
 
+> **Sustituida por [ADR-0020](#adr-0020--oauth2-resource-server-con-keycloak).** Se conserva
+> porque explica de dónde viene la decisión y qué detalles se mantuvieron.
+
 Los consumidores de esta API son sistemas internos —el autorizador y la herramienta de
 analistas—, no personas. Montar OAuth2 para dos clientes de confianza sería complejidad sin
 destinatario. Cuando aparezcan clientes externos, el reemplazo es
@@ -753,6 +787,27 @@ Tres detalles que no son opcionales:
 - **En producción la propiedad no tiene valor por defecto.** Si falta `API_KEY`, la aplicación
   no arranca. Una clave vacía que el filtro interpretara como "sin autenticación" convertiría un
   despliegue mal configurado en una API de fraude abierta a Internet.
+
+### ADR-0020 — OAuth2 Resource Server con Keycloak
+
+La clave compartida tenía tres límites que pesaban más a medida que el servicio crecía: no
+distinguía entre consumidores (el autorizador y los analistas tenían exactamente el mismo
+acceso), no vencía nunca y rotarla exigía coordinar a todos a la vez con un redespliegue. Con
+JWT de un proveedor OIDC cada consumidor tiene su identidad y sus roles, los tokens duran cinco
+minutos y revocar un cliente no afecta al resto.
+
+Se mantiene lo que la ADR-0019 había resuelto bien: la sonda de salud exenta, un único cuerpo de
+401 falte o esté mal la credencial, la credencial nunca en el log, y **sin valores por defecto en
+producción**: si falta `OIDC_ISSUER_URI` la aplicación no arranca.
+
+Dos decisiones con nombre propio:
+
+- **Se valida la audiencia.** Es la comprobación que más se omite y la que impide que un token
+  emitido para otro servicio del mismo realm sirva aquí. `SeguridadConKeycloakIT` lo prueba con
+  un cliente que tiene el rol pero no la audiencia, y desactivando la validación el test falla.
+- **Emisor y claves por URL separadas.** En `docker compose` quien pide el token ve a Keycloak en
+  `localhost:8180` y la app en `keycloak:8080`. El `iss` se fija con `KC_HOSTNAME` y las claves se
+  descargan por la red interna con `OIDC_JWK_SET_URI`.
 
 ### ADR-0006 — Validación en dos anillos
 
@@ -791,8 +846,9 @@ dos capas con propósitos distintos, no una duplicada.
 1. ~~**Rol de OIDC en Terraform.**~~ **Resuelto**: vive en `terraform/bootstrap/`, con la
    condición `sub` acotada al repositorio y a la rama, y `iam:PassRole` limitado a los dos roles
    de Centinela y sólo hacia `ecs-tasks.amazonaws.com`.
-2. **Rotación de la clave de API.** Hoy es un valor en Secrets Manager que se cambia a mano y
-   exige un redespliegue. Aceptar dos claves válidas a la vez permitiría rotarla sin ventana.
+2. ~~**Rotación de la clave de API.**~~ **Resuelto** por la [ADR-0020](#adr-0020--oauth2-resource-server-con-keycloak):
+   ya no hay clave compartida; los tokens vencen a los cinco minutos y Keycloak rota sus claves
+   de firma publicándolas en el JWKS.
 3. Ventana deslizante en los contadores de velocidad. La actual es fija: un atacante que conozca
    el umbral puede repartir la ráfaga a caballo de dos ventanas y colar hasta el doble.
 4. Arrendamiento por entrada en la bandeja de salida. Hoy dos relevos concurrentes pueden
