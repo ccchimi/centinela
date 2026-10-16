@@ -3,7 +3,7 @@
 #
 #   docker compose --profile completo up -d   TODO: infra + aplicación + observabilidad
 #
-#   docker compose up -d                      sólo la infraestructura (Kafka, LocalStack, Redis)
+#   docker compose up -d                      sólo la infraestructura (Kafka, LocalStack, Redis, Keycloak)
 #   docker compose --profile app up -d        además la aplicación nativa
 #   docker compose --profile obs up -d        además Jaeger, Prometheus y Grafana
 #
@@ -14,7 +14,8 @@
 #
 # Puertos publicados:
 #   8080  API de Centinela          16686  Jaeger (trazas)
-#   9090  Prometheus                 3000  Grafana (anónimo, sin login)
+#   8180  Keycloak (admin/admin)     9090  Prometheus
+#   3000  Grafana (anónimo, sin login)
 # =================================================================================================
 
 name: centinela
@@ -96,6 +97,42 @@ services:
       retries: 10
 
   # -----------------------------------------------------------------------------------------
+  # Keycloak: emite los tokens con los que se llama a la API. Importa el realm versionado en
+  # infra/keycloak al arrancar, así que roles, clientes y audiencias son los mismos que usan
+  # los tests de integración.
+  #
+  # KC_HOSTNAME fija el emisor (iss) en http://localhost:8180 pida el token quien lo pida: el
+  # que lo pide desde el portátil y la app que lo valida dentro de la red de compose tienen que
+  # ver el mismo 'iss', o la validación lo rechaza. Las claves públicas, en cambio, la app las
+  # descarga por la red interna (ver OIDC_JWK_SET_URI más abajo).
+  #
+  # start-dev: HTTP, base H2 en memoria y caché local. Sólo para desarrollo: el realm se
+  # reimporta en cada arranque y los secretos de los clientes son públicos (están en el repo).
+  # -----------------------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    container_name: centinela-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8180
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8180:8080"
+    volumes:
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # La imagen no trae curl ni wget: se habla HTTP a mano por /dev/tcp con bash. La sonda
+      # de salud vive en el puerto de gestión (9000), no en el de la aplicación.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -q '\"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # -----------------------------------------------------------------------------------------
   # La aplicación, compilada nativa. Perfil 'app' de compose: no se levanta por defecto.
   # -----------------------------------------------------------------------------------------
   centinela:
@@ -112,10 +149,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      keycloak:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       SPRING_PROFILES_ACTIVE: local
+      # El emisor es el que ve quien pide el token (localhost:8180); las claves se descargan
+      # por la red interna, donde Keycloak es 'keycloak:8080'.
+      OIDC_ISSUER_URI: http://localhost:8180/realms/centinela
+      OIDC_JWK_SET_URI: http://keycloak:8080/realms/centinela/protocol/openid-connect/certs
       # Desde dentro de la red de compose, los servicios se ven por su nombre.
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
       REDIS_HOST: redis

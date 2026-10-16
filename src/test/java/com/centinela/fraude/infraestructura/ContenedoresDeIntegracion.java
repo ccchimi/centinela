@@ -4,13 +4,16 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
 import org.springframework.test.context.DynamicPropertyRegistrar;
+import java.time.Duration;
 import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.localstack.LocalStackContainer;
 import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.utility.MountableFile;
 
 /**
- * Los contenedores reales del sistema: Kafka, LocalStack (DynamoDB) y Redis.
+ * Los contenedores reales del sistema: Kafka, LocalStack (DynamoDB), Redis y Keycloak.
  *
  * <p>Se declaran como {@code @Bean} y no como campos {@code static}, que es la forma moderna:
  * así Spring gestiona su ciclo de vida y, sobre todo, <strong>el caché de contextos de Spring
@@ -52,6 +55,45 @@ public class ContenedoresDeIntegracion {
     @Bean
     LocalStackContainer localstack() {
         return new LocalStackContainer(DockerImageName.parse("localstack/localstack:3.8"));
+    }
+
+    /**
+     * Keycloak con el mismo realm que usa {@code docker compose}: el fichero versionado en
+     * {@code infra/keycloak}, no una copia para tests. Si alguien cambia un rol o una audiencia
+     * en el realm, estos tests lo notan.
+     *
+     * <p>Es el contenedor más lento de la suite (Keycloak arranca en decenas de segundos), pero
+     * se paga una sola vez: el caché de contextos lo comparte con el resto de pruebas.
+     */
+    @Bean
+    GenericContainer<?> keycloak() {
+        return new GenericContainer<>(DockerImageName.parse("quay.io/keycloak/keycloak:26.8.1"))
+                .withExposedPorts(8080)
+                .withEnv("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
+                .withEnv("KC_BOOTSTRAP_ADMIN_PASSWORD", "admin")
+                .withCopyFileToContainer(
+                        MountableFile.forHostPath("infra/keycloak/centinela-realm.json"),
+                        "/opt/keycloak/data/import/centinela-realm.json")
+                .withCommand("start-dev", "--import-realm")
+                .waitingFor(Wait.forHttp("/realms/centinela/.well-known/openid-configuration")
+                        .forPort(8080)
+                        .withStartupTimeout(Duration.ofMinutes(3)));
+    }
+
+    /**
+     * El emisor que espera la aplicación es la URL por la que el test pide los tokens: sin
+     * {@code KC_HOSTNAME}, Keycloak firma con el host de la petición, y el test la hace contra el
+     * puerto mapeado. Si no coincidieran, la validación de {@code iss} rechazaría todo.
+     */
+    @Bean
+    DynamicPropertyRegistrar propiedadesDeKeycloak(GenericContainer<?> keycloak) {
+        return registro -> {
+            String emisor = "http://%s:%d/realms/centinela".formatted(keycloak.getHost(), keycloak.getMappedPort(8080));
+            registro.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> emisor);
+            registro.add(
+                    "spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
+                    () -> emisor + "/protocol/openid-connect/certs");
+        };
     }
 
     /**

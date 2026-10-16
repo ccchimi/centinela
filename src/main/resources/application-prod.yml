@@ -35,6 +35,17 @@ spring:
       # Debe coincidir con las particiones del topic; por encima, los consumidores sobran.
       concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}
 
+  # Sin valores por defecto: si falta el emisor la aplicación no arranca. Un default apuntando
+  # a localhost dejaría la API rechazando todo en silencio, o peor, aceptando tokens de un
+  # Keycloak de desarrollo si alguien lo levantara en la misma red.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI}
+          jwk-set-uri: ${OIDC_JWK_SET_URI}
+          audiences: ${OIDC_AUDIENCIA}
+
   data:
     redis:
       host: ${REDIS_HOST}
@@ -55,12 +66,6 @@ centinela:
       tabla-perfiles: ${TABLA_PERFILES}
       tabla-auditoria: ${TABLA_AUDITORIA}
       tabla-bandeja: ${TABLA_BANDEJA}
-
-  seguridad:
-    # Sin valor por defecto: si la variable no llega, la aplicación no arranca. Es preferible
-    # un contenedor que no levanta a una API de fraude abierta a Internet.
-    # La inyecta Secrets Manager a través del task definition, nunca la imagen.
-    api-key: ${API_KEY}
 
   motor:
     politica:

@@ -30,6 +30,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
@@ -46,8 +47,13 @@ import org.springframework.test.web.servlet.MockMvc;
  * que este test no comprueba lógica de fraude —para eso están los unitarios y los de
  * integración— sino el contrato HTTP: códigos de estado, forma del cuerpo y, sobre todo, que
  * cada excepción de dominio salga con el estado que le corresponde.
+ *
+ * <p>Sin filtros: la autenticación y las reglas de acceso se prueban aparte, en
+ * {@link SeguridadDeLaApiTest}. Mezclarlas aquí obligaría a adjuntar un token a cada petición y
+ * cada test de contrato fallaría también por motivos de seguridad, que no es lo que mide.
  */
 @WebMvcTest(controllers = {ControladorDeEvaluaciones.class, ControladorDePerfiles.class})
+@AutoConfigureMockMvc(addFilters = false)
 @Import({
     ManejadorGlobalDeErrores.class,
     ManejadorDeUltimoRecurso.class,

@@ -123,6 +123,27 @@ spring:
       observation-enabled: true
 
   # ============================================================================================
+  # Autenticación de la API: JWT de un proveedor OIDC (Keycloak en local).
+  #
+  # - issuer-uri:  el 'iss' que deben traer los tokens. Se compara como texto exacto.
+  # - jwk-set-uri: de dónde se descargan las claves públicas para verificar la firma. Se separa
+  #                del emisor porque dentro de docker compose la app alcanza a Keycloak por la
+  #                red interna (keycloak:8080) mientras el emisor que firma es localhost:8180.
+  # - audiences:   el token tiene que haber sido emitido PARA esta API. Sin esto, cualquier
+  #                token válido del mismo realm, emitido para otro servicio, entraría aquí.
+  #
+  # Nada de esto descarga nada al arrancar: las claves se piden con la primera petición y se
+  # cachean, así que la app levanta aunque el proveedor todavía no esté listo.
+  # ============================================================================================
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/centinela}
+          jwk-set-uri: ${OIDC_JWK_SET_URI:${spring.security.oauth2.resourceserver.jwt.issuer-uri}/protocol/openid-connect/certs}
+          audiences: ${OIDC_AUDIENCIA:centinela-api}
+
+  # ============================================================================================
   # ElastiCache (Valkey/Redis) - contadores de velocidad
   # ============================================================================================
   data:
@@ -192,14 +213,10 @@ centinela:
       timeout-de-publicacion: 5s
 
   # ------------------------------------------------------------------------------------------
-  # Seguridad de la API REST. Clave compartida en la cabecera X-API-KEY.
-  #
-  # El valor por defecto es de DESARROLLO y está en el repositorio: sirve para levantar el
-  # entorno local sin fricción. En application-prod.yml esta propiedad NO tiene defecto, así
-  # que un despliegue sin API_KEY no arranca en vez de quedarse abierto.
+  # Seguridad de la API REST. La validación de tokens está en spring.security.oauth2 (arriba);
+  # aquí sólo las rutas que quedan fuera de la autenticación.
   # ------------------------------------------------------------------------------------------
   seguridad:
-    api-key: ${API_KEY:clave-de-desarrollo-no-usar-en-produccion}
     rutas-publicas:
       # El balanceador consulta la sonda sin credenciales. Si la protegiéramos, el health check
       # daría 401, ECS marcaría la tarea como no sana y la reciclaría en bucle.

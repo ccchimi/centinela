@@ -43,8 +43,8 @@ centinela:
     rutas-publicas:
       # Todo /actuator abierto, SOLO en local.
       #
-      # Hace falta para que Prometheus pueda hacer scraping de /actuator/prometheus: el filtro
-      # de X-API-KEY sólo exime la sonda de salud, asi que sin esto el target sale 401 y el
+      # Hace falta para que Prometheus pueda hacer scraping de /actuator/prometheus: la API
+      # sólo exime la sonda de salud del token, asi que sin esto el target sale 401 y el
       # panel de Grafana se queda vacio sin explicacion aparente.
       #
       # De paso permite curiosear /actuator/metrics, /actuator/env y /actuator/configprops a

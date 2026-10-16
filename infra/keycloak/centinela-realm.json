@@ -1,0 +1,177 @@
+{
+  "realm": "centinela",
+  "enabled": true,
+  "displayName": "Centinela (DESARROLLO)",
+  "sslRequired": "external",
+  "accessTokenLifespan": 300,
+  "revokeRefreshToken": true,
+  "bruteForceProtected": true,
+  "roles": {
+    "realm": [
+      {
+        "name": "evaluador",
+        "description": "Puede pedir la evaluación de una transacción (POST /api/v1/evaluaciones)"
+      },
+      {
+        "name": "analista",
+        "description": "Puede consultar decisiones y perfiles de comportamiento"
+      }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "roles",
+      "description": "Roles del realm en realm_access.roles",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "roles del realm",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "centinela-api",
+      "description": "Agrega centinela-api a la audiencia del token. Sin este scope, la API rechaza el token.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "audiencia centinela-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "centinela-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "autorizador",
+      "name": "Autorizador de tarjetas",
+      "description": "Sistema que pide un veredicto por cada autorización. Client credentials.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "secreto-autorizador-SOLO-DESARROLLO",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [
+        "roles",
+        "centinela-api"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "herramienta-analistas",
+      "name": "Herramienta de analistas",
+      "description": "Backend de la consola de analistas de fraude. Client credentials.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "secreto-analistas-SOLO-DESARROLLO",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [
+        "roles",
+        "centinela-api"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "otro-servicio",
+      "name": "Otro servicio del realm",
+      "description": "Existe para probar que un token válido emitido para OTRA audiencia no entra en Centinela, aunque tenga el rol.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "secreto-otro-SOLO-DESARROLLO",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [
+        "roles"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "scopeMappings": [
+    {
+      "client": "autorizador",
+      "roles": [
+        "evaluador"
+      ]
+    },
+    {
+      "client": "herramienta-analistas",
+      "roles": [
+        "analista"
+      ]
+    },
+    {
+      "client": "otro-servicio",
+      "roles": [
+        "evaluador"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-autorizador",
+      "enabled": true,
+      "serviceAccountClientId": "autorizador",
+      "realmRoles": [
+        "evaluador"
+      ]
+    },
+    {
+      "username": "service-account-herramienta-analistas",
+      "enabled": true,
+      "serviceAccountClientId": "herramienta-analistas",
+      "realmRoles": [
+        "analista"
+      ]
+    },
+    {
+      "username": "service-account-otro-servicio",
+      "enabled": true,
+      "serviceAccountClientId": "otro-servicio",
+      "realmRoles": [
+        "evaluador"
+      ]
+    }
+  ]
+}
