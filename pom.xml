@@ -58,6 +58,12 @@
         <artifactId>lz4-java</artifactId>
         <version>1.11.4</version>
       </dependency>
+      <!-- Transitiva de kafka-clients. CVE-2026-108106 y CVE-2026-93451 corregidas en 1.1.10.9. -->
+      <dependency>
+        <groupId>org.xerial.snappy</groupId>
+        <artifactId>snappy-java</artifactId>
+        <version>1.1.10.12</version>
+      </dependency>
       <dependency>
         <groupId>software.amazon.awssdk</groupId>
         <artifactId>bom</artifactId>
